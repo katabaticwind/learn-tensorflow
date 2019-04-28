@@ -6,11 +6,12 @@ import time
 from environments import state_dimensions, available_actions
 
 FLAGS = tf.app.flags.FLAGS
-
 tf.app.flags.DEFINE_string('mode', 'train', """'Train' or 'test'.""")
-tf.app.flags.DEFINE_string('env_name', 'CartPole-v0', """Gym environment""")
-tf.app.flags.DEFINE_string('save_path', './checkpoints/', """Checkpoint file""")
-tf.app.flags.DEFINE_string('load_path', './checkpoints/vpg-CartPole-v0', """Checkpoint file""")
+tf.app.flags.DEFINE_string('env_name', 'CartPole-v0', """Gym environment.""")
+tf.app.flags.DEFINE_list('hidden_units', '32', """Size of hidden layers.""")
+tf.app.flags.DEFINE_float('learning_rate', '1e-2', """Size of hidden layers.""")
+tf.app.flags.DEFINE_string('save_path', './checkpoints/', """Checkpoint file.""")
+tf.app.flags.DEFINE_string('load_path', './checkpoints/vpg-CartPole-v0', """Checkpoint file.""")
 tf.app.flags.DEFINE_boolean('render', False, """Render once per batch in training mode.""")
 
 
@@ -34,10 +35,10 @@ def reward_to_go(rewards):
             c += [r + c[i - 1]]
     return list(reversed(c))
 
-def train(env_name='CartPole-v0', hidden_sizes=[32], lr=1e-2, batches=100, batch_size=5000, save_path=None, render=False):
+def train(env_name='CartPole-v0', hidden_units=[32], learning_rate=1e-2, batches=100, batch_size=5000, save_path=None, render=False):
 
     # create an environment
-    env = gym.make('CartPole-v0')
+    env = gym.make(env_name)
     n_dims = state_dimensions(env)
     n_actions = available_actions(env)
 
@@ -47,14 +48,14 @@ def train(env_name='CartPole-v0', hidden_sizes=[32], lr=1e-2, batches=100, batch
     rewards_pl = tf.placeholder(tf.float32, (None, ))
 
     # create a policy network
-    logits = mlp(states_pl, hidden_sizes + [n_actions])
+    logits = mlp(states_pl, hidden_units + [n_actions])
     actions = tf.squeeze(tf.random.categorical(logits=logits, num_samples=1), axis=1)  # chooses an action
 
     # define training operation
     actions_mask = tf.one_hot(actions_pl, n_actions)
     log_probs = tf.reduce_sum(actions_mask * tf.nn.log_softmax(logits), axis=1)  # use tf.mask instead?
     loss = -tf.reduce_mean(rewards_pl * log_probs)
-    train_op = tf.train.AdamOptimizer(learning_rate=lr).minimize(loss)  # TODO: creates tf.math_ops warning (?)
+    train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)  # TODO: creates tf.math_ops warning (?)
 
     # create a saver
     saver = tf.train.Saver()
@@ -119,7 +120,7 @@ def train(env_name='CartPole-v0', hidden_sizes=[32], lr=1e-2, batches=100, batch
             saver.save(sess, save_path=save_path + 'vpg-' + env_name)
             return saver.last_checkpoints
 
-def test(load_path, env_name='CartPole-v0', hidden_sizes=[32], episodes=100, render=False):
+def test(load_path, env_name='CartPole-v0', hidden_units=[32], episodes=100, render=False):
     """
     Load and test a trained model from checkpoint files.
 
@@ -132,7 +133,7 @@ def test(load_path, env_name='CartPole-v0', hidden_sizes=[32], episodes=100, ren
     rewards_pl = tf.placeholder(tf.float32, (None, ))
 
     # create a policy network
-    logits = mlp(states_pl, hidden_sizes + [2])
+    logits = mlp(states_pl, hidden_units + [2])
     actions = tf.squeeze(tf.random.categorical(logits=logits, num_samples=1), axis=1)  # chooses an action
 
     # create an environment
@@ -175,8 +176,14 @@ def test(load_path, env_name='CartPole-v0', hidden_sizes=[32], episodes=100, ren
 
 if __name__ == '__main__':
     if FLAGS.mode == 'train':
-        checkpoint_file = train(env_name=FLAGS.env_name, save_path=FLAGS.save_path, render=FLAGS.render)
+        checkpoint_file = train(env_name=FLAGS.env_name,
+                                hidden_units=[int(s) for s in FLAGS.hidden_units],
+                                learning_rate=FLAGS.learning_rate,
+                                save_path=FLAGS.save_path,
+                                render=FLAGS.render)
         print('Checkpoint saved to {}'.format(checkpoint_file))
     elif FLAGS.mode == 'test':
-        rewards = test(env_name = FLAGS.env_name, load_path=FLAGS.load_path, render=FLAGS.render)
+        rewards = test(env_name=FLAGS.env_name,
+                       load_path=FLAGS.load_path,
+                       render=FLAGS.render)
         print("mean = {:.2f},    std = {:.2f}".format(np.mean(rewards), np.std(rewards)))

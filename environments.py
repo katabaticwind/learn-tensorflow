@@ -1,9 +1,5 @@
 import gym, time
 
-"""
-
-"""
-
 def test_environment(env_name, render=True):
     """Run a sample episode of environment using a random action policy."""
     env = gym.make(env_name)
@@ -36,3 +32,4 @@ def state_dimensions(env):
 
 if __name__ == '__main__':
     test_environment('Breakout-v0')
+    # test_environment('LunarLander-v2')
