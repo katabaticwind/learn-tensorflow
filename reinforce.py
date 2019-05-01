@@ -3,15 +3,16 @@ import numpy as np
 import gym
 import time
 
-from environments import state_dimensions, available_actions
 
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('mode', 'train', """'Train' or 'test'.""")
 tf.app.flags.DEFINE_string('env_name', 'CartPole-v0', """Gym environment.""")
 tf.app.flags.DEFINE_string('hidden_units', '32', """Size of hidden layers.""")
-tf.app.flags.DEFINE_float('learning_rate', '1e-2', """Size of hidden layers.""")
-tf.app.flags.DEFINE_string('save_path', './checkpoints/', """Checkpoint file.""")
-tf.app.flags.DEFINE_string('load_path', './checkpoints/vpg-CartPole-v0', """Checkpoint file.""")
+tf.app.flags.DEFINE_float('learning_rate', '1e-2', """Initial learning rate.""")
+tf.app.flags.DEFINE_integer('batches', 100, """Batches per training update.""")
+tf.app.flags.DEFINE_integer('episodes', 100, """Episodes per test.""")
+tf.app.flags.DEFINE_string('save_path', './checkpoints/', """Checkpoint directory.""")
+tf.app.flags.DEFINE_string('load_path', './checkpoints/', """Checkpoint directory.""")
 tf.app.flags.DEFINE_boolean('render', False, """Render once per batch in training mode.""")
 
 
@@ -55,7 +56,7 @@ def train(env_name='CartPole-v0', hidden_units=[32], learning_rate=1e-2, batches
     # create placeholders
     states_pl = tf.placeholder(tf.float32, (None, n_dims))
     actions_pl = tf.placeholder(tf.int32, (None, ))
-    rewards_pl = tf.placeholder(tf.float32, (None, ))
+    weights_pl = tf.placeholder(tf.float32, (None, ))
 
     # create a policy network
     logits = mlp(states_pl, hidden_units + [n_actions])
@@ -65,7 +66,7 @@ def train(env_name='CartPole-v0', hidden_units=[32], learning_rate=1e-2, batches
     # define training operation
     actions_mask = tf.one_hot(actions_pl, n_actions)
     log_probs = tf.reduce_sum(actions_mask * tf.nn.log_softmax(logits), axis=1)  # use tf.mask instead?
-    loss = -tf.reduce_mean(rewards_pl * log_probs)
+    loss = -tf.reduce_mean(weights_pl * log_probs)
     train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)  # TODO: creates tf.math_ops warning (?)
 
     # create a saver
@@ -76,7 +77,9 @@ def train(env_name='CartPole-v0', hidden_units=[32], learning_rate=1e-2, batches
         state = env.reset()
         episode_states = [state]
         episode_actions = []
+        episode_weights = []
         total_reward = 0
+        total_steps = 0
         if render == True:
             env.render()
             time.sleep(0.01)
@@ -88,33 +91,39 @@ def train(env_name='CartPole-v0', hidden_units=[32], learning_rate=1e-2, batches
                 time.sleep(0.01)
             episode_states += [state.copy()]  # no reshape b/c we will convert to np.array later...
             episode_actions += [action[0]]
+            episode_weights += [reward]
             total_reward += reward
+            total_steps += 1
             if done:
                 break
-        return episode_states, episode_actions, [total_reward] * len(episode_actions)
+        return episode_states, episode_actions, reward_to_go(episode_weights), total_reward, total_steps
 
     def run_batch(env, sess, render=False):
         t0 = time.time()
         batch_states = []
         batch_actions = []
+        batch_weights = []
         batch_rewards = []
+        batch_steps = []
         episodes = 0
-        while len(batch_rewards) < batch_size:
+        while len(batch_weights) < batch_size:
             if episodes == 0:
-                episode_states, episode_actions, episode_rewards = run_episode(env, sess, render=render)  # render first episode *if* render = True
+                episode_states, episode_actions, episode_weights, total_reward, total_steps = run_episode(env, sess, render=render)  # render first episode *if* render = True
             else:
-                episode_states, episode_actions, episode_rewards = run_episode(env, sess, render=False)
+                episode_states, episode_actions, episode_weights, total_reward, total_steps = run_episode(env, sess, render=False)
             episodes += 1
             batch_states.extend(episode_states[:-1])  # only keep states preceeding each action
             batch_actions.extend(episode_actions)
-            batch_rewards.extend(episode_rewards)
+            batch_weights.extend(episode_weights)
+            batch_rewards.append(total_reward)
+            batch_steps.append(total_steps)
         t = time.time()
-        return batch_states, batch_actions, batch_rewards, t - t0
+        return batch_states, batch_actions, batch_weights, np.mean(batch_rewards), np.mean(batch_steps), episodes, t - t0
 
-    def update_network(env, states, actions, rewards, sess):
+    def update_network(env, states, actions, weights, sess):
         feed_dict = {
             states_pl: states,
-            rewards_pl: rewards,
+            weights_pl: weights,
             actions_pl: actions
         }
         batch_loss, _ = sess.run([loss, train_op], feed_dict=feed_dict)
@@ -124,14 +133,14 @@ def train(env_name='CartPole-v0', hidden_units=[32], learning_rate=1e-2, batches
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
         for batch in range(batches):
-            batch_states, batch_actions, batch_rewards, batch_time = run_batch(env, sess, render)
-            batch_loss = update_network(env, batch_states, batch_actions, batch_rewards, sess)
-            print("batch = {:d},    reward = {:.2f} (mean),    time = {:.2f}".format(batch + 1, np.mean(batch_rewards), batch_time))
+            batch_states, batch_actions, batch_weights, batch_reward, batch_steps, batch_episodes, batch_time = run_batch(env, sess, render)
+            batch_loss = update_network(env, batch_states, batch_actions, batch_weights, sess)
+            print("batch = {:d},    reward = {:.2f} (mean),    steps = {:.2f} (mean),   time = {:.2f}".format(batch, batch_reward, batch_steps, batch_time))
         if save_path is not None:
             saver.save(sess, save_path=save_path + 'vpg-' + env_name)
             return saver.last_checkpoints
 
-def test(load_path, env_name='CartPole-v0', hidden_units=[32], episodes=100, render=False):
+def test(env_name='CartPole-v0', hidden_units=[32], episodes=100, load_path=None, render=False):
     """
     Load and test a trained model from checkpoint files.
 
@@ -141,7 +150,7 @@ def test(load_path, env_name='CartPole-v0', hidden_units=[32], episodes=100, ren
     # create placeholders
     states_pl = tf.placeholder(tf.float32, (None, 4))
     actions_pl = tf.placeholder(tf.int32, (None, ))
-    rewards_pl = tf.placeholder(tf.float32, (None, ))
+    weights_pl = tf.placeholder(tf.float32, (None, ))
 
     # create a policy network
     logits = mlp(states_pl, hidden_units + [2])
@@ -177,7 +186,7 @@ def test(load_path, env_name='CartPole-v0', hidden_units=[32], episodes=100, ren
 
     # run test
     with tf.Session() as sess:
-        saver.restore(sess, load_path + 'vpg-CartPole-v0')
+        saver.restore(sess, load_path + 'vpg-' + env_name)
         rewards = []
         for i in range(episodes):
             _, _, total_rewards = run_episode(env, sess, render=render)
@@ -186,18 +195,18 @@ def test(load_path, env_name='CartPole-v0', hidden_units=[32], episodes=100, ren
 
 
 if __name__ == '__main__':
-
     hidden_units = [int(i) for i in FLAGS.hidden_units.split(',')]
-
     if FLAGS.mode == 'train':
         checkpoint_file = train(env_name=FLAGS.env_name,
                                 hidden_units=hidden_units,
                                 learning_rate=FLAGS.learning_rate,
+                                batches=FLAGS.batches,
                                 save_path=FLAGS.save_path,
                                 render=FLAGS.render)
         print('Checkpoint saved to {}'.format(checkpoint_file))
     elif FLAGS.mode == 'test':
         rewards = test(env_name=FLAGS.env_name,
+                       episodes=FLAGS.episodes,
                        load_path=FLAGS.load_path,
                        render=FLAGS.render)
         print("mean = {:.2f},    std = {:.2f}".format(np.mean(rewards), np.std(rewards)))
