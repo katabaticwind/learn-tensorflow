@@ -8,7 +8,7 @@ from environments import state_dimensions, available_actions
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('mode', 'train', """'Train' or 'test'.""")
 tf.app.flags.DEFINE_string('env_name', 'CartPole-v0', """Gym environment.""")
-tf.app.flags.DEFINE_list('hidden_units', '32', """Size of hidden layers.""")
+tf.app.flags.DEFINE_string('hidden_units', '32', """Size of hidden layers.""")
 tf.app.flags.DEFINE_float('learning_rate', '1e-2', """Size of hidden layers.""")
 tf.app.flags.DEFINE_string('save_path', './checkpoints/', """Checkpoint file.""")
 tf.app.flags.DEFINE_string('load_path', './checkpoints/vpg-CartPole-v0', """Checkpoint file.""")
@@ -18,6 +18,16 @@ tf.app.flags.DEFINE_boolean('render', False, """Render once per batch in trainin
 # TODO: re-write mlp with low-level API (tf.Variables)
 # TODO: logits for action selection on CPU; logits for updates on GPU? (During batch construction, shape of logits is (1, 4); during update step shape is (5000, 4)).
 
+def available_actions(env):
+    # if type(env.action_space) == gym.spaces.discrete.Discrete:
+    try:
+        return env.action_space.n
+    except AttributeError:
+        raise AttributeError("env.action_space is not Discrete")
+
+def state_dimensions(env):
+    """Find the number of dimensions in the state."""
+    return env.observation_space.shape[0]
 
 def mlp(x, sizes, activation=tf.tanh, output_activation=None):
     """Build a feedforward neural network."""
@@ -49,7 +59,8 @@ def train(env_name='CartPole-v0', hidden_units=[32], learning_rate=1e-2, batches
 
     # create a policy network
     logits = mlp(states_pl, hidden_units + [n_actions])
-    actions = tf.squeeze(tf.random.categorical(logits=logits, num_samples=1), axis=1)  # chooses an action
+    # actions = tf.squeeze(tf.random.categorical(logits=logits, num_samples=1), axis=1)  # chooses an action
+    actions = tf.squeeze(tf.multinomial(logits=logits, num_samples=1), axis=1)  # chooses an action
 
     # define training operation
     actions_mask = tf.one_hot(actions_pl, n_actions)
@@ -175,9 +186,12 @@ def test(load_path, env_name='CartPole-v0', hidden_units=[32], episodes=100, ren
 
 
 if __name__ == '__main__':
+
+    hidden_units = [int(i) for i in FLAGS.hidden_units.split(',')]
+
     if FLAGS.mode == 'train':
         checkpoint_file = train(env_name=FLAGS.env_name,
-                                hidden_units=[int(s) for s in FLAGS.hidden_units],
+                                hidden_units=hidden_units,
                                 learning_rate=FLAGS.learning_rate,
                                 save_path=FLAGS.save_path,
                                 render=FLAGS.render)
