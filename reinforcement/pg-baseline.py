@@ -8,6 +8,7 @@ import time
 
 tf.logging.set_verbosity(tf.logging.ERROR)  # suppress annoying messages
 
+
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('mode', 'train', """'Train' or 'test'.""")
 tf.app.flags.DEFINE_string('env_name', 'CartPole-v0', """Gym environment.""")
@@ -170,17 +171,19 @@ def test(env_name='CartPole-v0', hidden_units=[32], episodes=100, load_path=None
     if load_path is not None:
         print('\nTesting environment {} with agent found in {}...'.format(env_name, load_path + 'vpg-baseline-' + env_name))
 
+    # create an environment
+    env = gym.make(env_name)
+    n_dims = state_dimensions(env)
+    n_actions = available_actions(env)
+
     # create placeholders
-    states_pl = tf.placeholder(tf.float32, (None, 4))
+    states_pl = tf.placeholder(tf.float32, (None, n_dims))
     actions_pl = tf.placeholder(tf.int32, (None, ))
     weights_pl = tf.placeholder(tf.float32, (None, ))
 
     # create a policy network
-    logits = mlp(states_pl, hidden_units + [2])
+    logits = mlp(states_pl, hidden_units + [n_actions])
     actions = tf.squeeze(tf.random.categorical(logits=logits, num_samples=1), axis=1)  # chooses an action
-
-    # create an environment
-    env = gym.make('CartPole-v0')
 
     # create saver
     saver = tf.train.Saver()
