@@ -37,8 +37,22 @@ def state_dimensions(env):
     """Find the number of dimensions in the state."""
     return env.observation_space.shape[0]
 
-def process_atari(state):
-    return np.mean(state[1:-1, :, :], axis=2) / 255
+def process_frame(frame):
+    return np.mean(frame[1:-1, :, :], axis=2).reshape(208, 160, 1) / 255
+
+def create_mini_batch(frames):
+    """Convert frames to 'states'. 'state' observations consist of four consecutive frames.
+
+        `frames`: list of 208 x 160 x 1 np.ndarrays.
+    """
+    f0 = frames[0]
+    frames_1 = [f0] + frames[0:-1]
+    frames_2 = [f0, f0] + frames[0:-2]
+    frames_3 = [f0, f0, f0] + frames[0:-3]
+    states = []
+    for i in range(len(frames)):
+        states.append(np.concatenate([frames_3[i], frames_2[i], frames_1[i], frames[i]], axis=2))
+    return states
 
 def mlp(x, sizes, activation=tf.tanh, output_activation=None):
     """Build a feedforward neural network."""
@@ -204,7 +218,7 @@ def train(env_name='CartPole-v0', hidden_units=[32], learning_rate=1e-2, batches
             saver.save(sess, save_path=save_path + 'vpg-baseline-' + env_name)
             return saver.last_checkpoints
 
-def train_cnn(env_name='Breakout-v0', filters=[32, 64], hidden_units=[1024], learning_rate=1e-2, batches=100, batch_size=128, mini_batch_size=32, save_path=None, render=False):
+def train_atari(env_name='Breakout-v0', filters=[32, 64], hidden_units=[1024], learning_rate=1e-5, batches=100, batch_size=3200, mini_batch_size=32, save_path=None, render=False):
 
     """
     The state space if huge for Atari games: 210 x 160 x 3. Even with down-sampling, we don't be able to use anything like 5000 samples in a batch. What we'll have to do is run a large number of steps, then perform updates in mini-batches of size (e.g.) Alternatively, we could collect the gradient updates for each mini-batch and perform one update for all 5000 observations. We need to play at least one episode though in order to get weights of update.
@@ -215,7 +229,7 @@ def train_cnn(env_name='Breakout-v0', filters=[32, 64], hidden_units=[1024], lea
     n_actions = available_actions(env)
 
     # create placeholders
-    states_pl = tf.placeholder(tf.float32, (None, 208, 160))  # or 3?
+    states_pl = tf.placeholder(tf.float32, (None, 208, 160, 4))  # 4 frames per state
     actions_pl = tf.placeholder(tf.int32, (None, ))
     weights_pl = tf.placeholder(tf.float32, (None, ))
 
@@ -240,32 +254,55 @@ def train_cnn(env_name='Breakout-v0', filters=[32, 64], hidden_units=[1024], lea
     saver = tf.train.Saver()
 
     # define core functions
+    def initialize_env(env):
+        """Run environment with random action for three steps to accumulate frames.
+
+            Note: we don't use NOOP on first step because the game won't start.
+
+        """
+
+        def random_action():
+            a = 0
+            while a == 0:
+                a = env.action_space.sample()
+            return a
+
+        s0 = env.reset()
+        s1, _, _, _ = env.step(random_action())
+        s2, _, _, _ = env.step(random_action())
+        s3, _, _, _ = env.step(random_action())
+        return s0, s1, s2, s3
+
     def run_episode(env, sess, render=False):
-        state = env.reset()
-        episode_states = [process_atari(state)]
-        episode_actions = []
-        episode_weights = []
+        f0, f1, f2, f3 = initialize_env(env)
+        episode_frames = [process_frame(f0),  # 208 x 160 x 1
+                          process_frame(f1),
+                          process_frame(f2),
+                          process_frame(f3)]
+        episode_actions = [0, 0, 0]
+        episode_weights = [0, 0, 0]
         total_reward = 0
         total_steps = 0
         if render == True:
             env.render()
         while True:
-            action = sess.run(actions, feed_dict={states_pl: process_atari(state).reshape(-1, 208, 160)})[0]
-            state, reward, done, info = env.step(action)  # step requires scalar action
+            state = np.concatenate(episode_frames[-4:], axis=2)
+            action = sess.run(actions, feed_dict={states_pl: state)[0]
+            frame, reward, done, info = env.step(action)  # step requires scalar action
             if render == True:
                 env.render()
-            episode_states += [process_atari(state.copy())]  # copy needed?
+            episode_frames += [process_frame(frame)]  # copy needed?
             episode_actions += [action]
             episode_weights += [reward]
             total_reward += reward
             total_steps += 1
             if done:
                 break
-        return episode_states, episode_actions, reward_to_go(episode_weights), total_reward, total_steps
+        return episode_frames, episode_actions, reward_to_go(episode_weights), total_reward, total_steps
 
     def run_batch(env, sess, render=False):
         t0 = time.time()
-        batch_states = []
+        batch_frames = []
         batch_actions = []
         batch_weights = []
         batch_rewards = []
@@ -277,30 +314,32 @@ def train_cnn(env_name='Breakout-v0', filters=[32, 64], hidden_units=[1024], lea
             else:
                 episode_states, episode_actions, episode_weights, total_reward, total_steps = run_episode(env, sess, render=False)
             episodes += 1
-            batch_states.extend(episode_states[:-1])  # only keep states preceeding each action
+            batch_frames.extend(episode_states[:-1])  # only keep states preceeding each action
             batch_actions.extend(episode_actions)
             batch_weights.extend(episode_weights)
             batch_rewards.append(total_reward)
             batch_steps.append(total_steps)
         t = time.time()
-        return batch_states, batch_actions, batch_weights, np.mean(batch_rewards), np.mean(batch_steps), episodes, t - t0
+        return batch_frames, batch_actions, batch_weights, np.mean(batch_rewards), np.mean(batch_steps), episodes, t - t0
 
-    def update_policy_network(states, actions, weights, sess):
+    def update_policy_network(frames, actions, weights, sess):
         idx = 0
         while idx < batch_size:
+            states = create_mini_batch(frames[idx:idx + mini_batch_size])
             feed_dict = {
-                states_pl: states[idx:idx + mini_batch_size],
+                states_pl: states,
                 weights_pl: weights[idx:idx + mini_batch_size],
                 actions_pl: actions[idx:idx + mini_batch_size]
             }
             batch_loss, _ = sess.run([policy_loss, policy_train_op], feed_dict=feed_dict)
             idx += mini_batch_size
 
-    def update_value_network(states, weights, sess):
+    def update_value_network(frames, weights, sess):
         idx = 0
         while idx < batch_size:
+            states = create_mini_batch(frames[idx:idx + mini_batch_size])
             feed_dict = {
-                states_pl: states[idx:idx + mini_batch_size],
+                states_pl: states,
                 weights_pl: weights[idx:idx + mini_batch_size],
             }
             batch_loss, _ = sess.run([value_loss, value_train_op], feed_dict=feed_dict)
@@ -310,15 +349,12 @@ def train_cnn(env_name='Breakout-v0', filters=[32, 64], hidden_units=[1024], lea
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
         for batch in range(batches):
-            batch_states, batch_actions, batch_weights, batch_reward, batch_steps, batch_episodes, batch_time = run_batch(env, sess, render)
-            update_value_network(batch_states, batch_weights, sess)
-            update_policy_network(batch_states, batch_actions, batch_weights, sess)
-            print("batch = {:d},    reward = {:.2f} (mean),    steps = {:.2f} (mean),   time = {:.2f}".format(batch, batch_reward, batch_steps, batch_time))
-        if save_path is not None:
-            saver.save(sess, save_path=save_path + 'vpg-baseline-' + env_name)
-            return saver.last_checkpoints
-
-
+            batch_frames, batch_actions, batch_weights, batch_reward, batch_steps, batch_episodes, batch_time = run_batch(env, sess, render)
+            update_value_network(batch_frames, batch_weights, sess)
+            update_policy_network(batch_frames, batch_actions, batch_weights, sess)
+            print("batch = {:d},    reward = {:.2f} (mean),    steps = {:.2f} (mean),   episodes = {:d},    time = {:.2f}".format(batch, batch_reward, batch_steps, batch_episodes, batch_time))
+            if (batch % 10 == 0) and (save_path is not None):
+                saver.save(sess, save_path=save_path + 'vpg-baseline-' + env_name)
 
 def test(env_name='CartPole-v0', hidden_units=[32], episodes=100, load_path=None, render=False):
     """
@@ -378,19 +414,21 @@ def test(env_name='CartPole-v0', hidden_units=[32], episodes=100, load_path=None
             rewards += [np.mean(total_rewards)]
         return rewards
 
+def test_atari(env_name='Breakout-v0', filters=[32, 64], hidden_units=[1024], load_path=None, render=False):
+    pass
 
 if __name__ == '__main__':
     filters = [int(i) for i in FLAGS.filters.split(',')]
     hidden_units = [int(i) for i in FLAGS.hidden_units.split(',')]
     if FLAGS.mode == 'train':
         if FLAGS.atari:
-            checkpoint_file = train_cnn(env_name=FLAGS.env_name,
-                                        filters=filters,
-                                        hidden_units=hidden_units,
-                                        learning_rate=FLAGS.learning_rate,
-                                        batches=FLAGS.batches,
-                                        save_path=FLAGS.save_path,
-                                        render=FLAGS.render)
+            checkpoint_file = train_atari(env_name=FLAGS.env_name,
+                                          filters=filters,
+                                          hidden_units=hidden_units,
+                                          learning_rate=FLAGS.learning_rate,
+                                          batches=FLAGS.batches,
+                                          save_path=FLAGS.save_path,
+                                          render=FLAGS.render)
         else:
             checkpoint_file = train(env_name=FLAGS.env_name,
                                     hidden_units=hidden_units,
@@ -400,8 +438,14 @@ if __name__ == '__main__':
                                     render=FLAGS.render)
         print('Checkpoint saved to {}'.format(checkpoint_file))
     elif FLAGS.mode == 'test':
-        rewards = test(env_name=FLAGS.env_name,
-                       episodes=FLAGS.episodes,
-                       load_path=FLAGS.load_path,
-                       render=FLAGS.render)
+        if FLAGS.atari:
+            rewards = test_atari(env_name=FLAGS.env_name,
+                                 episodes=FLAGS.episodes,
+                                 load_path=FLAGS.load_path,
+                                 render=FLAGS.render)
+        else:
+            rewards = test(env_name=FLAGS.env_name,
+                           episodes=FLAGS.episodes,
+                           load_path=FLAGS.load_path,
+                           render=FLAGS.render)
         print("> mean = {:.2f}\n> std = {:.2f}".format(np.mean(rewards), np.std(rewards)))
