@@ -4,7 +4,9 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # suppress all messages
 import numpy as np
 import gym
 import time
+from collections import deque
 
+from atari import crop_frame, RGB_to_luminance, convert_frames, append_to_queue
 
 tf.logging.set_verbosity(tf.logging.ERROR)  # suppress annoying messages
 
@@ -13,7 +15,7 @@ FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('mode', 'train', """'Train' or 'test'.""")
 tf.app.flags.DEFINE_boolean('atari', False, """Flag for Atari environments.""")
 tf.app.flags.DEFINE_string('env_name', 'CartPole-v0', """Gym environment.""")
-tf.app.flags.DEFINE_string('filters', '32,64', """Number of filters in CNN layers.""")
+tf.app.flags.DEFINE_string('filters', '16,32', """Number of filters in CNN layers.""")
 tf.app.flags.DEFINE_string('hidden_units', '32', """Size of hidden layers.""")
 tf.app.flags.DEFINE_float('learning_rate', '1e-2', """Initial learning rate.""")
 tf.app.flags.DEFINE_integer('batches', 100, """Batches per training update.""")
@@ -37,23 +39,6 @@ def state_dimensions(env):
     """Find the number of dimensions in the state."""
     return env.observation_space.shape[0]
 
-def process_frame(frame):
-    return np.mean(frame[1:-1, :, :], axis=2).reshape(208, 160, 1) / 255
-
-def create_mini_batch(frames):
-    """Convert frames to 'states'. 'state' observations consist of four consecutive frames.
-
-        `frames`: list of 208 x 160 x 1 np.ndarrays.
-    """
-    f0 = frames[0]
-    frames_1 = [f0] + frames[0:-1]
-    frames_2 = [f0, f0] + frames[0:-2]
-    frames_3 = [f0, f0, f0] + frames[0:-3]
-    states = []
-    for i in range(len(frames)):
-        states.append(np.concatenate([frames_3[i], frames_2[i], frames_1[i], frames[i]], axis=2))
-    return states
-
 def mlp(x, sizes, activation=tf.tanh, output_activation=None):
     """Build a feedforward neural network."""
     for size in sizes[:-1]:
@@ -62,8 +47,7 @@ def mlp(x, sizes, activation=tf.tanh, output_activation=None):
 
 def cnn(x, filters, units, activation=tf.nn.relu, output_activation=None):
 
-    # x shape is: batch_size, 208 - 2, 160, 1 or 3?
-    x = tf.reshape(x, (-1, 208, 160, 1))
+    x = tf.reshape(x, (-1, 84, 84, 4))
 
     # conv1
     x = tf.layers.conv2d(
@@ -76,7 +60,7 @@ def cnn(x, filters, units, activation=tf.nn.relu, output_activation=None):
         inputs=x,
         pool_size=[2, 2],
         strides=2
-    )  # batch_size x 104 x 80 x filters[0]
+    )  # batch_size x 42 x 42 x filters[0]
 
     # conv2
     x = tf.layers.conv2d(
@@ -89,10 +73,10 @@ def cnn(x, filters, units, activation=tf.nn.relu, output_activation=None):
         inputs=x,
         pool_size=[2, 2],
         strides=2
-    )  # batch_size x 52 x 40 x filters[1]
+    )  # batch_size x 21 x 21 x filters[1]
 
     # dense
-    x = tf.reshape(x, (-1, 52 * 40 * filters[1]))  # flatten x
+    x = tf.reshape(x, (-1, 21 * 21 * filters[1]))  # flatten x
     x = tf.layers.dense(x, units[0], tf.nn.relu)  # 1024
 
     # logits
@@ -218,18 +202,14 @@ def train(env_name='CartPole-v0', hidden_units=[32], learning_rate=1e-2, batches
             saver.save(sess, save_path=save_path + 'vpg-baseline-' + env_name)
             return saver.last_checkpoints
 
-def train_atari(env_name='Breakout-v0', filters=[32, 64], hidden_units=[1024], learning_rate=1e-5, batches=100, batch_size=3200, mini_batch_size=32, save_path=None, render=False):
-
-    """
-    The state space if huge for Atari games: 210 x 160 x 3. Even with down-sampling, we don't be able to use anything like 5000 samples in a batch. What we'll have to do is run a large number of steps, then perform updates in mini-batches of size (e.g.) Alternatively, we could collect the gradient updates for each mini-batch and perform one update for all 5000 observations. We need to play at least one episode though in order to get weights of update.
-    """
+def train_atari(env_name='Breakout-v0', filters=[16, 32], hidden_units=[1024], learning_rate=1e-6, episodes=100, batch_size=32, save_path=None, render=False):
 
     # create an environment
     env = gym.make(env_name)
     n_actions = available_actions(env)
 
     # create placeholders
-    states_pl = tf.placeholder(tf.float32, (None, 208, 160, 4))  # 4 frames per state
+    states_pl = tf.placeholder(tf.float32, (None, 84, 84, 4))  # 4 frames per state
     actions_pl = tf.placeholder(tf.int32, (None, ))
     weights_pl = tf.placeholder(tf.float32, (None, ))
 
@@ -253,108 +233,78 @@ def train_atari(env_name='Breakout-v0', filters=[32, 64], hidden_units=[1024], l
     # create a saver
     saver = tf.train.Saver()
 
-    # define core functions
-    def initialize_env(env):
-        """Run environment with random action for three steps to accumulate frames.
-
-            Note: we don't use NOOP on first step because the game won't start.
-
-        """
-
-        def random_action():
-            a = 0
-            while a == 0:
-                a = env.action_space.sample()
-            return a
-
-        s0 = env.reset()
-        s1, _, _, _ = env.step(random_action())
-        s2, _, _, _ = env.step(random_action())
-        s3, _, _, _ = env.step(random_action())
-        return s0, s1, s2, s3
-
+    # core functions
     def run_episode(env, sess, render=False):
-        f0, f1, f2, f3 = initialize_env(env)
-        episode_frames = [process_frame(f0),  # 208 x 160 x 1
-                          process_frame(f1),
-                          process_frame(f2),
-                          process_frame(f3)]
-        episode_actions = [0, 0, 0]
-        episode_weights = [0, 0, 0]
+        frame = env.reset()
+        frame_queue = deque()
+        append_to_queue(frame_queue, frame, max_len=4)
+        state = convert_frames(frame_queue, min_len=4)
+        episode_states = [state]
+        episode_actions = []
+        episode_weights = []
         total_reward = 0
         total_steps = 0
         if render == True:
             env.render()
         while True:
-            state = np.concatenate(episode_frames[-4:], axis=2)
-            action = sess.run(actions, feed_dict={states_pl: state)[0]
+            action = sess.run(actions, feed_dict={states_pl: state.reshape(1, 84, 84, 4)})[0]
             frame, reward, done, info = env.step(action)  # step requires scalar action
             if render == True:
                 env.render()
-            episode_frames += [process_frame(frame)]  # copy needed?
+            append_to_queue(frame_queue, frame, max_len=4)
+            state = convert_frames(frame_queue, min_len=4)
+            episode_states += [state]  # copy needed?
             episode_actions += [action]
             episode_weights += [reward]
             total_reward += reward
             total_steps += 1
+            # print("steps={}, action={}".format(total_steps, action))
             if done:
                 break
-        return episode_frames, episode_actions, reward_to_go(episode_weights), total_reward, total_steps
+        return episode_states[:-1], episode_actions, reward_to_go(episode_weights), total_reward, total_steps
 
-    def run_batch(env, sess, render=False):
-        t0 = time.time()
-        batch_frames = []
-        batch_actions = []
-        batch_weights = []
-        batch_rewards = []
-        batch_steps = []
-        episodes = 0
-        while len(batch_weights) < batch_size:
-            if episodes == 0:
-                episode_states, episode_actions, episode_weights, total_reward, total_steps = run_episode(env, sess, render=render)
-            else:
-                episode_states, episode_actions, episode_weights, total_reward, total_steps = run_episode(env, sess, render=False)
-            episodes += 1
-            batch_frames.extend(episode_states[:-1])  # only keep states preceeding each action
-            batch_actions.extend(episode_actions)
-            batch_weights.extend(episode_weights)
-            batch_rewards.append(total_reward)
-            batch_steps.append(total_steps)
-        t = time.time()
-        return batch_frames, batch_actions, batch_weights, np.mean(batch_rewards), np.mean(batch_steps), episodes, t - t0
-
-    def update_policy_network(frames, actions, weights, sess):
+    def update_policy_network(states, actions, weights, sess):
         idx = 0
-        while idx < batch_size:
-            states = create_mini_batch(frames[idx:idx + mini_batch_size])
+        while idx < len(states):
             feed_dict = {
-                states_pl: states,
-                weights_pl: weights[idx:idx + mini_batch_size],
-                actions_pl: actions[idx:idx + mini_batch_size]
+                states_pl: states[idx:idx + batch_size],
+                weights_pl: weights[idx:idx + batch_size],
+                actions_pl: actions[idx:idx + batch_size]
             }
             batch_loss, _ = sess.run([policy_loss, policy_train_op], feed_dict=feed_dict)
-            idx += mini_batch_size
+            idx += batch_size
 
-    def update_value_network(frames, weights, sess):
+    def update_value_network(states, weights, sess):
         idx = 0
-        while idx < batch_size:
-            states = create_mini_batch(frames[idx:idx + mini_batch_size])
+        while idx < len(states):
             feed_dict = {
-                states_pl: states,
-                weights_pl: weights[idx:idx + mini_batch_size],
+                states_pl: states[idx:idx + batch_size],
+                weights_pl: weights[idx:idx + batch_size],
             }
             batch_loss, _ = sess.run([value_loss, value_train_op], feed_dict=feed_dict)
-            idx += mini_batch_size
+            idx += batch_size
 
     # train the network
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
-        for batch in range(batches):
-            batch_frames, batch_actions, batch_weights, batch_reward, batch_steps, batch_episodes, batch_time = run_batch(env, sess, render)
-            update_value_network(batch_frames, batch_weights, sess)
-            update_policy_network(batch_frames, batch_actions, batch_weights, sess)
-            print("batch = {:d},    reward = {:.2f} (mean),    steps = {:.2f} (mean),   episodes = {:d},    time = {:.2f}".format(batch, batch_reward, batch_steps, batch_episodes, batch_time))
-            if (batch % 10 == 0) and (save_path is not None):
-                saver.save(sess, save_path=save_path + 'vpg-baseline-' + env_name)
+        t0 = time.time()
+        avg_reward = 0
+        for episode in range(episodes):
+            if (episode + 1) % 10 == 0:
+                batch_states, batch_actions, batch_weights, reward, steps = run_episode(env, sess, True)
+            else:
+                batch_states, batch_actions, batch_weights, reward, steps = run_episode(env, sess, render)
+            avg_reward += reward
+            update_value_network(batch_states, batch_weights, sess)
+            update_policy_network(batch_states, batch_actions, batch_weights, sess)
+            if (episode + 1) % 10 == 0:
+                elapsed_time = time.time() - t0
+                avg_reward = avg_reward / 10
+                print("episode: {:d},  reward: {:.2f},  elapsed_time: {:.2f}".format(episode + 1, avg_reward, elapsed_time))
+                avg_reward = 0
+                if save_path is not None:
+                    saver.save(sess, save_path=save_path + 'pg-baseline-' + env_name, global_step=episode + 1)
+        return saver.last_checkpoints
 
 def test(env_name='CartPole-v0', hidden_units=[32], episodes=100, load_path=None, render=False):
     """
@@ -426,7 +376,7 @@ if __name__ == '__main__':
                                           filters=filters,
                                           hidden_units=hidden_units,
                                           learning_rate=FLAGS.learning_rate,
-                                          batches=FLAGS.batches,
+                                          episodes=FLAGS.batches,
                                           save_path=FLAGS.save_path,
                                           render=FLAGS.render)
         else:

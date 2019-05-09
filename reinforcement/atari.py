@@ -1,7 +1,7 @@
 import numpy as np
 import gym
 from collections import deque
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 import cv2 as cv
 
 # TODO: consider "down-sampling" image?
