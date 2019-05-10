@@ -17,10 +17,11 @@ tf.app.flags.DEFINE_string('network', 'mlp', """'mlp' or 'cnn'""")
 tf.app.flags.DEFINE_string('env_name', 'Pong-v0', """Gym environment.""")
 tf.app.flags.DEFINE_string('filters', '8,16', """Number of filters in CNN layers.""")
 tf.app.flags.DEFINE_string('hidden_units', '256,128', """Size of hidden layers.""")
-tf.app.flags.DEFINE_float('lr', '1e-6', """Initial learning rate.""")
+tf.app.flags.DEFINE_float('lr', '1e-3', """Initial learning rate.""")
 tf.app.flags.DEFINE_integer('batches', 1000, """Batches per training run.""")
 tf.app.flags.DEFINE_integer('episodes_per_batch', 10, """Episodes per batch.""")
 tf.app.flags.DEFINE_integer('frames_per_state', 2, """Frames used to construct a state.""")
+tf.app.flags.DEFINE_integer('report_freq', 1, """Batches between reports.""")
 tf.app.flags.DEFINE_string('save_path', './checkpoints/', """Checkpoint directory.""")
 tf.app.flags.DEFINE_string('load_path', './checkpoints/', """Checkpoint directory.""")
 tf.app.flags.DEFINE_boolean('render', False, """Render once per batch in training mode.""")
@@ -44,8 +45,6 @@ def mlp(x, sizes, activation=tf.tanh, output_activation=None):
     return tf.layers.dense(x, units=sizes[-1], activation=output_activation)
 
 def cnn(x, filters, units, activation=tf.nn.relu, output_activation=None):
-
-    # x = tf.reshape(x, (-1, 84, 84, frames_per_state))
 
     # conv1
     x = tf.layers.conv2d(
@@ -90,7 +89,7 @@ def reward_to_go(rewards):
             c += [r + c[i - 1]]
     return list(reversed(c))
 
-def train(env_name='Pong-v0', network='mlp', filters=[8, 16], hidden_units=[32], lr=1e-3, batches=100, episodes_per_batch=3, frames_per_state=2, save_path=None, render=False):
+def train(env_name='Pong-v0', network='mlp', filters=[8, 16], hidden_units=[32], lr=1e-3, batches=100, episodes_per_batch=3, frames_per_state=2, report_freq=1, save_path=None, render=False):
 
     # create an environment
     env = gym.make(env_name)
@@ -201,7 +200,7 @@ def train(env_name='Pong-v0', network='mlp', filters=[8, 16], hidden_units=[32],
             update_value_network(batch_states, batch_weights, sess)
             update_policy_network(batch_states, batch_actions, batch_weights, sess)
             print("batch: {:d},  (avg) reward: {:.2f},  (total) steps: {:.2f},  elapsed_time: {:.2f}".format(batch + 1, reward, steps, elapsed_time))
-            if (save_path is not None) and (batch + 1 % 10 == 0):
+            if (save_path is not None) and (batch + 1 % report_freq == 0):
                 saver.save(sess, save_path=save_path + 'pg-atari-' + env_name, global_step=batch + 1)
         return saver.last_checkpoints
 
@@ -218,6 +217,7 @@ if __name__ == '__main__':
                                 batches=FLAGS.batches,
                                 episodes_per_batch=FLAGS.episodes_per_batch,
                                 frames_per_state=FLAGS.frames_per_state,
+                                report_freq=FLAGS.report_freq,
                                 save_path=FLAGS.save_path,
                                 render=FLAGS.render)
         print('Checkpoint saved to {}'.format(checkpoint_file))

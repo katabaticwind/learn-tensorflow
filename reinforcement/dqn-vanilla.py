@@ -6,9 +6,6 @@ import gym
 import time
 from collections import deque  # for replay memory
 
-# TODO: clipping error terms in update to (-1, 1)
-# TODO: regularization? (l1, l2, dropout or batch normalization)
-
 
 tf.logging.set_verbosity(tf.logging.ERROR)
 
@@ -105,8 +102,10 @@ def train(env_name='CartPole-v0', hidden_units=[32], lr=1e-2, init_epsilon=1.0, 
     # initialize networks
     action_values = mlp(states_pl, hidden_units + [n_actions], scope='value')
     target_values = mlp(states_pl, hidden_units + [n_actions], scope='target')
-    greedy_action = tf.math.argmax(action_values, axis=1)
-    target_actions = tf.math.argmax(target_values, axis=1)
+    # greedy_action = tf.math.argmax(action_values, axis=1)
+    # target_actions = tf.math.argmax(target_values, axis=1)
+    greedy_action = tf.arg_max(action_values, dimension=1)
+    target_actions = tf.arg_max(target_values, dimension=1)
     value_mask = tf.one_hot(actions_pl, n_actions)
     target_mask = tf.one_hot(target_actions, n_actions)
     values = tf.reduce_sum(value_mask * action_values, axis=1)
@@ -207,14 +206,14 @@ def train(env_name='CartPole-v0', hidden_units=[32], lr=1e-2, init_epsilon=1.0, 
         t0 = time.time()
         total_reward = 0
         for episode in range(episodes):
-            if (episode + 1) % 100 == 0:
-                episode_reward, episode_steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, True)
+            if (episode + 1) % 5 == 0:
+                episode_reward, episode_steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=render)
             else:
-                episode_reward, episode_steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render)
+                episode_reward, episode_steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=False)
             total_reward += episode_reward
-            if (episode + 1) % 100 == 0:
+            if (episode + 1) % 5 == 0:
                 elapsed_time = time.time() - t0
-                mean_reward = total_reward / 100
+                mean_reward = total_reward / 5
                 print('episode: {:d},  reward: {:.2f},  (global) steps:  {:d},  (global) epsilon: {:.2f},  elapsed: {:.2f}'.format(episode + 1, mean_reward, global_step, global_epsilon, elapsed_time))
                 if save_path is not None:
                     saver.save(sess, save_path=save_path + 'dqn-vanilla-' + env_name, global_step=global_step)
@@ -245,7 +244,8 @@ def test(env_name='CartPole-v0', hidden_units=[32], epsilon=0.01, episodes=100, 
 
     # initialize networks
     action_values = mlp(states_pl, hidden_units + [n_actions], scope='value')
-    greedy_action = tf.math.argmax(action_values, axis=1)
+    # greedy_action = tf.math.argmax(action_values, axis=1)
+    greedy_action = tf.arg_max(action_values, dimension=1)
     value_mask = tf.one_hot(actions_pl, n_actions)
     values = tf.reduce_sum(value_mask * action_values, axis=1)
 

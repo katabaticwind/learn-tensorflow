@@ -13,20 +13,16 @@ tf.logging.set_verbosity(tf.logging.ERROR)  # suppress annoying messages
 
 FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('mode', 'train', """'Train' or 'test'.""")
-tf.app.flags.DEFINE_boolean('atari', False, """Flag for Atari environments.""")
 tf.app.flags.DEFINE_string('env_name', 'CartPole-v0', """Gym environment.""")
-tf.app.flags.DEFINE_string('filters', '16,32', """Number of filters in CNN layers.""")
 tf.app.flags.DEFINE_string('hidden_units', '32', """Size of hidden layers.""")
 tf.app.flags.DEFINE_float('learning_rate', '1e-2', """Initial learning rate.""")
 tf.app.flags.DEFINE_integer('batches', 100, """Batches per training update.""")
+tf.app.flags.DEFINE_integer('batch_size', 5000, """Batches per training update.""")
 tf.app.flags.DEFINE_integer('episodes', 100, """Episodes per test.""")
 tf.app.flags.DEFINE_string('save_path', './checkpoints/', """Checkpoint directory.""")
 tf.app.flags.DEFINE_string('load_path', './checkpoints/', """Checkpoint directory.""")
 tf.app.flags.DEFINE_boolean('render', False, """Render once per batch in training mode.""")
 
-
-# TODO: re-write mlp with low-level API (tf.Variables)
-# TODO: logits for action selection on CPU; logits for updates on GPU? (During batch construction, shape of logits is (1, 4); during update step shape is (5000, 4)).
 
 def available_actions(env):
     # if type(env.action_space) == gym.spaces.discrete.Discrete:
@@ -44,43 +40,6 @@ def mlp(x, sizes, activation=tf.tanh, output_activation=None):
     for size in sizes[:-1]:
         x = tf.layers.dense(x, units=size, activation=activation)  # TODO: creates multiple warnings (DEPRECATED)
     return tf.layers.dense(x, units=sizes[-1], activation=output_activation)
-
-def cnn(x, filters, units, activation=tf.nn.relu, output_activation=None):
-
-    x = tf.reshape(x, (-1, 84, 84, 4))
-
-    # conv1
-    x = tf.layers.conv2d(
-        inputs=x,
-        filters=filters[0],
-        kernel_size=[5, 5],
-        padding='same',
-        activation=tf.nn.relu)
-    x = tf.layers.max_pooling2d(
-        inputs=x,
-        pool_size=[2, 2],
-        strides=2
-    )  # batch_size x 42 x 42 x filters[0]
-
-    # conv2
-    x = tf.layers.conv2d(
-        inputs=x,
-        filters=filters[1],
-        kernel_size=[5, 5],
-        padding='same',
-        activation=tf.nn.relu)
-    x = tf.layers.max_pooling2d(
-        inputs=x,
-        pool_size=[2, 2],
-        strides=2
-    )  # batch_size x 21 x 21 x filters[1]
-
-    # dense
-    x = tf.reshape(x, (-1, 21 * 21 * filters[1]))  # flatten x
-    x = tf.layers.dense(x, units[0], tf.nn.relu)  # 1024
-
-    # logits
-    return tf.layers.dense(x, units[-1], activation=output_activation)
 
 def reward_to_go(rewards):
     """Calculate the cumulative reward at each step."""
@@ -202,110 +161,6 @@ def train(env_name='CartPole-v0', hidden_units=[32], learning_rate=1e-2, batches
             saver.save(sess, save_path=save_path + 'vpg-baseline-' + env_name)
             return saver.last_checkpoints
 
-def train_atari(env_name='Breakout-v0', filters=[16, 32], hidden_units=[1024], learning_rate=1e-6, episodes=100, batch_size=32, save_path=None, render=False):
-
-    # create an environment
-    env = gym.make(env_name)
-    n_actions = available_actions(env)
-
-    # create placeholders
-    states_pl = tf.placeholder(tf.float32, (None, 84, 84, 4))  # 4 frames per state
-    actions_pl = tf.placeholder(tf.int32, (None, ))
-    weights_pl = tf.placeholder(tf.float32, (None, ))
-
-    # create a policy network
-    logits = cnn(states_pl, filters, hidden_units + [n_actions])
-    actions = tf.squeeze(tf.multinomial(logits=logits, num_samples=1), axis=1)
-
-    # create a value network
-    values = cnn(states_pl, filters, hidden_units + [1])
-
-    # define policy network training operation
-    actions_mask = tf.one_hot(actions_pl, n_actions)
-    log_probs = tf.reduce_sum(actions_mask * tf.nn.log_softmax(logits), axis=1)
-    policy_loss = -tf.reduce_mean((weights_pl - values) * log_probs)
-    policy_train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(policy_loss)
-
-    # define value network training operation
-    value_loss = tf.losses.mean_squared_error(weights_pl, tf.squeeze(values, axis=1))
-    value_train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(value_loss)
-
-    # create a saver
-    saver = tf.train.Saver()
-
-    # core functions
-    def run_episode(env, sess, render=False):
-        frame = env.reset()
-        frame_queue = deque()
-        append_to_queue(frame_queue, frame, max_len=4)
-        state = convert_frames(frame_queue, min_len=4)
-        episode_states = [state]
-        episode_actions = []
-        episode_weights = []
-        total_reward = 0
-        total_steps = 0
-        if render == True:
-            env.render()
-        while True:
-            action = sess.run(actions, feed_dict={states_pl: state.reshape(1, 84, 84, 4)})[0]
-            frame, reward, done, info = env.step(action)  # step requires scalar action
-            if render == True:
-                env.render()
-            append_to_queue(frame_queue, frame, max_len=4)
-            state = convert_frames(frame_queue, min_len=4)
-            episode_states += [state]  # copy needed?
-            episode_actions += [action]
-            episode_weights += [reward]
-            total_reward += reward
-            total_steps += 1
-            # print("steps={}, action={}".format(total_steps, action))
-            if done:
-                break
-        return episode_states[:-1], episode_actions, reward_to_go(episode_weights), total_reward, total_steps
-
-    def update_policy_network(states, actions, weights, sess):
-        idx = 0
-        while idx < len(states):
-            feed_dict = {
-                states_pl: states[idx:idx + batch_size],
-                weights_pl: weights[idx:idx + batch_size],
-                actions_pl: actions[idx:idx + batch_size]
-            }
-            batch_loss, _ = sess.run([policy_loss, policy_train_op], feed_dict=feed_dict)
-            idx += batch_size
-
-    def update_value_network(states, weights, sess):
-        idx = 0
-        while idx < len(states):
-            feed_dict = {
-                states_pl: states[idx:idx + batch_size],
-                weights_pl: weights[idx:idx + batch_size],
-            }
-            batch_loss, _ = sess.run([value_loss, value_train_op], feed_dict=feed_dict)
-            idx += batch_size
-
-    # train the network
-    with tf.Session() as sess:
-        sess.run(tf.global_variables_initializer())
-        t0 = time.time()
-        avg_reward = 0
-        for episode in range(episodes):
-            if (episode + 1) % 10 == 0:
-                batch_states, batch_actions, batch_weights, reward, steps = run_episode(env, sess, True)
-            else:
-                batch_states, batch_actions, batch_weights, reward, steps = run_episode(env, sess, render)
-            avg_reward += reward
-            update_value_network(batch_states, batch_weights, sess)
-            update_policy_network(batch_states, batch_actions, batch_weights, sess)
-            if (episode + 1) % 10 == 0:
-                elapsed_time = time.time() - t0
-                avg_reward = avg_reward / 10
-                print("episode: {:d},  reward: {:.2f},  elapsed_time: {:.2f}".format(episode + 1, avg_reward, elapsed_time))
-                avg_reward = 0
-                if save_path is not None:
-                    saver.save(sess, save_path=save_path + 'pg-baseline-' + env_name, global_step=episode + 1)
-        return saver.last_checkpoints
-
 def test(env_name='CartPole-v0', hidden_units=[32], episodes=100, load_path=None, render=False):
     """
     Load and test a trained model from checkpoint files.
@@ -364,38 +219,20 @@ def test(env_name='CartPole-v0', hidden_units=[32], episodes=100, load_path=None
             rewards += [np.mean(total_rewards)]
         return rewards
 
-def test_atari(env_name='Breakout-v0', filters=[32, 64], hidden_units=[1024], load_path=None, render=False):
-    pass
-
 if __name__ == '__main__':
-    filters = [int(i) for i in FLAGS.filters.split(',')]
     hidden_units = [int(i) for i in FLAGS.hidden_units.split(',')]
     if FLAGS.mode == 'train':
-        if FLAGS.atari:
-            checkpoint_file = train_atari(env_name=FLAGS.env_name,
-                                          filters=filters,
-                                          hidden_units=hidden_units,
-                                          learning_rate=FLAGS.learning_rate,
-                                          episodes=FLAGS.batches,
-                                          save_path=FLAGS.save_path,
-                                          render=FLAGS.render)
-        else:
-            checkpoint_file = train(env_name=FLAGS.env_name,
-                                    hidden_units=hidden_units,
-                                    learning_rate=FLAGS.learning_rate,
-                                    batches=FLAGS.batches,
-                                    save_path=FLAGS.save_path,
-                                    render=FLAGS.render)
+        checkpoint_file = train(env_name=FLAGS.env_name,
+                                hidden_units=hidden_units,
+                                learning_rate=FLAGS.learning_rate,
+                                batches=FLAGS.batches,
+                                batch_size=FLAGS.batch_size,
+                                save_path=FLAGS.save_path,
+                                render=FLAGS.render)
         print('Checkpoint saved to {}'.format(checkpoint_file))
     elif FLAGS.mode == 'test':
-        if FLAGS.atari:
-            rewards = test_atari(env_name=FLAGS.env_name,
-                                 episodes=FLAGS.episodes,
-                                 load_path=FLAGS.load_path,
-                                 render=FLAGS.render)
-        else:
-            rewards = test(env_name=FLAGS.env_name,
-                           episodes=FLAGS.episodes,
-                           load_path=FLAGS.load_path,
-                           render=FLAGS.render)
+        rewards = test(env_name=FLAGS.env_name,
+                       episodes=FLAGS.episodes,
+                       load_path=FLAGS.load_path,
+                       render=FLAGS.render)
         print("> mean = {:.2f}\n> std = {:.2f}".format(np.mean(rewards), np.std(rewards)))
