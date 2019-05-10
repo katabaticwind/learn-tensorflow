@@ -89,7 +89,7 @@ def reward_to_go(rewards):
             c += [r + c[i - 1]]
     return list(reversed(c))
 
-def train(env_name='Pong-v0', network='mlp', filters=[8, 16], hidden_units=[32], lr=1e-3, batches=100, episodes_per_batch=3, frames_per_state=2, report_freq=1, save_path=None, render=False):
+def train(env_name='Pong-v0', network='mlp', filters=[8, 16], hidden_units=[256, 128], lr=1e-3, batches=1000, episodes_per_batch=5, frames_per_state=2, report_freq=1, save_path=None, render=False):
 
     # create an environment
     env = gym.make(env_name)
@@ -121,7 +121,7 @@ def train(env_name='Pong-v0', network='mlp', filters=[8, 16], hidden_units=[32],
 
     # define value network training operation
     value_loss = tf.losses.mean_squared_error(weights_pl, tf.squeeze(values, axis=1))
-    value_train_op = tf.train.AdamOptimizer(learning_rate=lr).minimize(value_loss)
+    value_train_op = tf.train.RMSPropOptimizer(learning_rate=lr).minimize(value_loss)
 
     # create a saver
     saver = tf.train.Saver()
