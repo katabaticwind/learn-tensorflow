@@ -4,9 +4,6 @@ from collections import deque
 # import matplotlib.pyplot as plt
 import cv2 as cv
 
-# TODO: consider "down-sampling" image?
-# TODO: any consistent window across games?
-
 """
 Codes to pre-process Atari environment frames.
 
@@ -28,7 +25,7 @@ def crop_frame(X):
 
 def RGB_to_luminance(X):
     """Calculate the relative luminance of an RGB image/frame."""
-    X = X / 255  # convert to [0, 1] range!
+    X = (X / 255).astype(np.float32)  # convert to [0, 1] range!
     L = 0.2126 * X[:, :, 0] + 0.7152 * X[:, :, 1] + 0.0722 * X[:, :, 2]
     return L.reshape(L.shape + (1,))
 
