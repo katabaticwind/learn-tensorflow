@@ -13,13 +13,14 @@ FLAGS = tf.app.flags.FLAGS
 
 tf.app.flags.DEFINE_string('mode', 'train', """'Train' or 'test'.""")
 tf.app.flags.DEFINE_string('env_name', 'CartPole-v0', """Gym environment.""")
-tf.app.flags.DEFINE_string('hidden_units', '64,32', """Size of hidden layers.""")
+tf.app.flags.DEFINE_string('hidden_units', '64', """Size of hidden layers.""")
 tf.app.flags.DEFINE_float('lr', '1e-3', """Initial learning rate.""")
 tf.app.flags.DEFINE_float('init_epsilon', 1.0, """Initial exploration rate.""")
 tf.app.flags.DEFINE_float('min_epsilon', 0.01, """Minimum exploration rate.""")
 tf.app.flags.DEFINE_integer('batch_size', 32, """Examples per training update.""")
 tf.app.flags.DEFINE_integer('episodes', 1000, """Episodes per train/test routine.""")
 tf.app.flags.DEFINE_integer('clone_steps', 1000, """Steps between cloning ops.""")
+tf.app.flags.DEFINE_integer('max_steps', 300, """Maximum steps per episode.""")
 tf.app.flags.DEFINE_integer('anneal_steps', 10000, """Steps per train/test routine.""")
 tf.app.flags.DEFINE_integer('min_memory_size', 10000, """Minimum number of replay memories.""")
 tf.app.flags.DEFINE_integer('max_memory_size', 100000, """Maximum number of replay memories.""")
@@ -88,7 +89,21 @@ def sample_memory(memory, size):
     dones = np.array([b[4] for b in batch])
     return states, actions, next_states, rewards, dones
 
-def train(env_name='CartPole-v0', hidden_units=[64,32], lr=1e-3, init_epsilon=1.0, min_epsilon=0.01, batch_size=32, episodes=1000, clone_steps=1000, anneal_steps=10000, min_memory_size=10000, max_memory_size=100000, checkpoint_freq=25, save_path=None, render=False):
+def train(env_name='CartPole-v0',
+          hidden_units=[64,32],
+          lr=1e-3,
+          init_epsilon=1.0,
+          min_epsilon=0.01,
+          batch_size=32,
+          episodes=1000,
+          clone_steps=1000,
+          anneal_steps=10000,
+          max_steps=300,
+          min_memory_size=10000,
+          max_memory_size=100000,
+          checkpoint_freq=25,
+          save_path=None,
+          render=False):
 
     # create an environment
     env = gym.make(env_name)
@@ -194,7 +209,7 @@ def train(env_name='CartPole-v0', hidden_units=[64,32], lr=1e-3, init_epsilon=1.
             episode_steps += 1
 
             # check if you're done
-            if done:
+            if done or episode_steps == max_steps:
                 break
 
         return episode_reward, episode_steps, global_step, global_epsilon
@@ -307,6 +322,8 @@ if __name__ == '__main__':
               episodes=FLAGS.episodes,
               clone_steps=FLAGS.clone_steps,
               anneal_steps=FLAGS.anneal_steps,
+              max_steps=FLAGS.max_steps,
+              checkpoint_freq=FLAGS.checkpoint_freq,
               min_memory_size=FLAGS.min_memory_size,
               max_memory_size=FLAGS.max_memory_size,
               save_path=FLAGS.save_path,

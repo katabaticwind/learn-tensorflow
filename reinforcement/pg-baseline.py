@@ -16,6 +16,7 @@ tf.app.flags.DEFINE_float('learning_rate', '1e-2', """Initial learning rate.""")
 tf.app.flags.DEFINE_integer('batches', 100, """Batches per training update.""")
 tf.app.flags.DEFINE_integer('batch_size', 5000, """Batches per training update.""")
 tf.app.flags.DEFINE_integer('episodes', 100, """Episodes per test.""")
+tf.app.flags.DEFINE_integer('checkpoint_freq', 10, """Batches between checkpoints.""")
 tf.app.flags.DEFINE_string('save_path', './checkpoints/', """Checkpoint directory.""")
 tf.app.flags.DEFINE_string('load_path', './checkpoints/', """Checkpoint directory.""")
 tf.app.flags.DEFINE_boolean('render', False, """Render once per batch in training mode.""")
@@ -54,7 +55,7 @@ def train(env_name='CartPole-v0',
           batches=100,
           batch_size=5000,
           save_path=None,
-          checkpoint_freq=5,
+          checkpoint_freq=10,
           render=False):
 
     # create an environment
@@ -164,9 +165,9 @@ def train(env_name='CartPole-v0',
             global_step += batch_steps
             print("batch = {:d},  batch reward = {:.2f} (mean),  batch episodes = {:d}, batch time = {:.2f},  batch steps = {:.2f},  global steps = {:.2f}".format(batch, batch_rewards / batch_episodes, batch_episodes, batch_time, batch_steps, global_step))
             if (save_path is not None) and (batch % checkpoint_freq == 0):
-                saver.save(sess, save_path=save_path + 'vpg-baseline-' + env_name, global_step=global_step)
+                saver.save(sess, save_path=save_path + 'pg-baseline-' + env_name, global_step=global_step)
         if (save_path is not None):
-            saver.save(sess, save_path=save_path + 'vpg-baseline-' + env_name, global_step=global_step)
+            saver.save(sess, save_path=save_path + 'pg-baseline-' + env_name, global_step=global_step)
             return saver.last_checkpoints
 
 def test(env_name='CartPole-v0',
@@ -181,7 +182,7 @@ def test(env_name='CartPole-v0',
     """
 
     if load_path is not None:
-        print('\nTesting environment {} with agent found in {}...'.format(env_name, load_path + 'vpg-baseline-' + env_name))
+        print('\nTesting environment {} with agent found in {}...'.format(env_name, load_path + 'pg-baseline-' + env_name))
 
     # create an environment
     env = gym.make(env_name)
@@ -224,7 +225,7 @@ def test(env_name='CartPole-v0',
 
     # run test
     with tf.Session() as sess:
-        saver.restore(sess, load_path + 'vpg-baseline-' + env_name)
+        saver.restore(sess, load_path + 'pg-baseline-' + env_name)
         rewards = []
         for i in range(episodes):
             _, _, total_rewards = run_episode(env, sess, render=render)
@@ -239,6 +240,7 @@ if __name__ == '__main__':
                                 learning_rate=FLAGS.learning_rate,
                                 batches=FLAGS.batches,
                                 batch_size=FLAGS.batch_size,
+                                checkpoint_freq=FLAGS.checkpoint_freq,
                                 save_path=FLAGS.save_path,
                                 render=FLAGS.render)
         print('Checkpoint saved to {}'.format(checkpoint_file))
