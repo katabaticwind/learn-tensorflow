@@ -14,15 +14,16 @@ FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('mode', 'train', """'Train' or 'test'.""")
 tf.app.flags.DEFINE_string('env_name', 'CartPole-v0', """Gym environment.""")
 tf.app.flags.DEFINE_string('hidden_units', '64,32', """Size of hidden layers.""")
-tf.app.flags.DEFINE_float('lr', '1e-2', """Initial learning rate.""")
-tf.app.flags.DEFINE_float('init_epsilon', 0.5, """Initial exploration rate.""")
+tf.app.flags.DEFINE_float('lr', '1e-3', """Initial learning rate.""")
+tf.app.flags.DEFINE_float('init_epsilon', 1.0, """Initial exploration rate.""")
 tf.app.flags.DEFINE_float('min_epsilon', 0.01, """Minimum exploration rate.""")
 tf.app.flags.DEFINE_integer('batch_size', 32, """Examples per training update.""")
+tf.app.flags.DEFINE_integer('episodes', 1000, """Episodes per train/test routine.""")
 tf.app.flags.DEFINE_integer('clone_steps', 1000, """Steps between cloning ops.""")
+tf.app.flags.DEFINE_integer('anneal_steps', 10000, """Steps per train/test routine.""")
 tf.app.flags.DEFINE_integer('min_memory_size', 10000, """Minimum number of replay memories.""")
 tf.app.flags.DEFINE_integer('max_memory_size', 100000, """Maximum number of replay memories.""")
-tf.app.flags.DEFINE_integer('episodes', 1000, """Episodes per train/test routine.""")
-tf.app.flags.DEFINE_integer('anneal_steps', 2000, """Steps per train/test routine.""")
+tf.app.flags.DEFINE_integer('checkpoint_freq', 25, """Steps per checkpoint.""")
 tf.app.flags.DEFINE_string('save_path', './checkpoints/', """Checkpoint directory.""")
 tf.app.flags.DEFINE_string('load_path', './checkpoints/', """Checkpoint directory.""")
 tf.app.flags.DEFINE_boolean('render', False, """Render once per batch in training mode.""")
@@ -87,7 +88,7 @@ def sample_memory(memory, size):
     dones = np.array([b[4] for b in batch])
     return states, actions, next_states, rewards, dones
 
-def train(env_name='CartPole-v0', hidden_units=[32], lr=1e-2, init_epsilon=1.0, min_epsilon=0.1, batch_size=128, episodes=100, clone_steps=1000, anneal_steps=20000, min_memory_size=1000, max_memory_size=2000, save_path=None, render=False):
+def train(env_name='CartPole-v0', hidden_units=[64,32], lr=1e-3, init_epsilon=1.0, min_epsilon=0.01, batch_size=32, episodes=1000, clone_steps=1000, anneal_steps=10000, min_memory_size=10000, max_memory_size=100000, checkpoint_freq=25, save_path=None, render=False):
 
     # create an environment
     env = gym.make(env_name)
@@ -206,18 +207,20 @@ def train(env_name='CartPole-v0', hidden_units=[32], lr=1e-2, init_epsilon=1.0, 
         t0 = time.time()
         total_reward = 0
         for episode in range(episodes):
-            if (episode + 1) % 5 == 0:
+            if (episode + 1) % checkpoint_freq == 0:
                 episode_reward, episode_steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=render)
             else:
                 episode_reward, episode_steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=False)
             total_reward += episode_reward
-            if (episode + 1) % 5 == 0:
+            if (episode + 1) % checkpoint_freq == 0:
                 elapsed_time = time.time() - t0
-                mean_reward = total_reward / 5
+                mean_reward = total_reward / checkpoint_freq
                 print('episode: {:d},  reward: {:.2f},  (global) steps:  {:d},  (global) epsilon: {:.2f},  elapsed: {:.2f}'.format(episode + 1, mean_reward, global_step, global_epsilon, elapsed_time))
                 if save_path is not None:
                     saver.save(sess, save_path=save_path + 'dqn-vanilla-' + env_name, global_step=global_step)
                 total_reward = 0
+        if save_path is not None:
+            saver.save(sess, save_path=save_path + 'dqn-vanilla-' + env_name, global_step=global_step)
         return saver.last_checkpoints
 
 def find_latest_checkpoint(load_path, prefix):

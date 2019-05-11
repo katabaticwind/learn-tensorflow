@@ -5,9 +5,6 @@ import numpy as np
 import gym
 import time
 from collections import deque
-
-from atari import crop_frame, RGB_to_luminance, convert_frames, append_to_queue
-
 tf.logging.set_verbosity(tf.logging.ERROR)  # suppress annoying messages
 
 
@@ -51,7 +48,14 @@ def reward_to_go(rewards):
             c += [r + c[i - 1]]
     return list(reversed(c))
 
-def train(env_name='CartPole-v0', hidden_units=[32], learning_rate=1e-2, batches=100, batch_size=5000, save_path=None, render=False):
+def train(env_name='CartPole-v0',
+          hidden_units=[32],
+          learning_rate=1e-2,
+          batches=100,
+          batch_size=5000,
+          save_path=None,
+          checkpoint_freq=5,
+          render=False):
 
     # create an environment
     env = gym.make(env_name)
@@ -115,8 +119,8 @@ def train(env_name='CartPole-v0', hidden_units=[32], learning_rate=1e-2, batches
         batch_states = []
         batch_actions = []
         batch_weights = []
-        batch_rewards = []
-        batch_steps = []
+        batch_rewards = 0
+        batch_steps = 0
         episodes = 0
         while len(batch_weights) < batch_size:
             if episodes == 0:
@@ -127,10 +131,10 @@ def train(env_name='CartPole-v0', hidden_units=[32], learning_rate=1e-2, batches
             batch_states.extend(episode_states[:-1])  # only keep states preceeding each action
             batch_actions.extend(episode_actions)
             batch_weights.extend(episode_weights)
-            batch_rewards.append(total_reward)
-            batch_steps.append(total_steps)
+            batch_rewards += total_reward
+            batch_steps += total_steps
         t = time.time()
-        return batch_states, batch_actions, batch_weights, np.mean(batch_rewards), np.mean(batch_steps), episodes, t - t0
+        return batch_states, batch_actions, batch_weights, batch_rewards, batch_steps, episodes, t - t0
 
     def update_policy_network(states, actions, weights, sess):
         feed_dict = {
@@ -152,16 +156,24 @@ def train(env_name='CartPole-v0', hidden_units=[32], learning_rate=1e-2, batches
     # train the network
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
+        global_step = 0
         for batch in range(batches):
-            batch_states, batch_actions, batch_weights, batch_reward, batch_steps, batch_episodes, batch_time = run_batch(env, sess, render)
+            batch_states, batch_actions, batch_weights, batch_rewards, batch_steps, batch_episodes, batch_time = run_batch(env, sess, render)
             _ = update_value_network(batch_states, batch_weights, sess)
             _ = update_policy_network(batch_states, batch_actions, batch_weights, sess)
-            print("batch = {:d},    reward = {:.2f} (mean),    steps = {:.2f} (mean),   time = {:.2f}".format(batch, batch_reward, batch_steps, batch_time))
-        if save_path is not None:
-            saver.save(sess, save_path=save_path + 'vpg-baseline-' + env_name)
+            global_step += batch_steps
+            print("batch = {:d},  batch reward = {:.2f} (mean),  batch episodes = {:d}, batch time = {:.2f},  batch steps = {:.2f},  global steps = {:.2f}".format(batch, batch_rewards / batch_episodes, batch_episodes, batch_time, batch_steps, global_step))
+            if (save_path is not None) and (batch % checkpoint_freq == 0):
+                saver.save(sess, save_path=save_path + 'vpg-baseline-' + env_name, global_step=global_step)
+        if (save_path is not None):
+            saver.save(sess, save_path=save_path + 'vpg-baseline-' + env_name, global_step=global_step)
             return saver.last_checkpoints
 
-def test(env_name='CartPole-v0', hidden_units=[32], episodes=100, load_path=None, render=False):
+def test(env_name='CartPole-v0',
+         hidden_units=[32],
+         episodes=100,
+         load_path=None,
+         render=False):
     """
     Load and test a trained model from checkpoint files.
 
@@ -235,4 +247,4 @@ if __name__ == '__main__':
                        episodes=FLAGS.episodes,
                        load_path=FLAGS.load_path,
                        render=FLAGS.render)
-        print("> mean = {:.2f}\n> std = {:.2f}".format(np.mean(rewards), np.std(rewards)))
+        print("> avg. reward = {:.2f} ({:.2f})".format(np.mean(rewards), np.std(rewards)))
