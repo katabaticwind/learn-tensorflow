@@ -17,14 +17,14 @@ Default settings for various reinforcement learning algorithms and tasks.
   - batches: 300
 - ### `dqn-vanilla`
   - hidden_units: 64, 64
-  - learning_rate: 1e-3
+  - learning_rate: 1e-3 (1e-4)
   - batch_size: 64
   - lr_decay: 1.00
   - discount_factor: 0.99
   - init_epsilon: 1.00
   - min_epsilon: 0.01
   - eps_decay: 0.995
-  - episodes: 3000
+  - episodes: 3000 (2000)
   - update_freq: 4
   - clone_steps: 1e4
   - min_memory_size: 1e4

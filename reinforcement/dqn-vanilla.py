@@ -48,6 +48,7 @@ tf.app.flags.DEFINE_integer('max_memory_size', 100000, """Maximum number of repl
 tf.app.flags.DEFINE_integer('checkpoint_freq', 100, """Steps per checkpoint.""")
 tf.app.flags.DEFINE_string('save_path', './checkpoints/', """Checkpoint directory.""")
 tf.app.flags.DEFINE_string('load_path', './checkpoints/', """Checkpoint directory.""")
+tf.app.flags.DEFINE_string('log_dir', './logs/', """Log directory.""")
 tf.app.flags.DEFINE_boolean('render', False, """Render once per batch in training mode.""")
 
 def available_actions(env):
@@ -110,6 +111,11 @@ def sample_memory(memory, size):
     dones = np.array([b[4] for b in batch])
     return states, actions, next_states, rewards, dones
 
+def log_scalar(logger, tag, value, step):
+    value = [tf.Summary.Value(tag=tag, simple_value=value)]
+    summary = tf.Summary(value=value)
+    logger.add_summary(summary, step)
+
 def train(env_name='CartPole-v0',
           device='/cpu:0',
           hidden_units=[64,64],
@@ -128,6 +134,7 @@ def train(env_name='CartPole-v0',
           max_memory_size=100000,
           checkpoint_freq=100,
           save_path=None,
+          log_dir=None,
           render=True):
 
     # create an environment
@@ -170,6 +177,9 @@ def train(env_name='CartPole-v0',
 
         # create a saver
         saver = tf.train.Saver()
+
+        # create logger
+        logger = tf.summary.FileWriter(log_dir)
 
     def clone_network(sess):
         """Clone `action_values` network to `target_values`."""
@@ -266,6 +276,12 @@ def train(env_name='CartPole-v0',
             elapsed_time = time.time() - t0
             avg_reward = np.mean(reward_history[-100:])
             print('episode: {:d},  reward: {:.2f},  avg. reward: {:.2f},  steps:  {:d},  epsilon: {:.2f}, lr: {:.2e},  elapsed: {:.2f}'.format(episode + 1, reward, avg_reward, global_step, global_epsilon, learning_rate, elapsed_time))
+
+            # logging
+            log_scalar(logger, 'reward', reward, global_step)
+            log_scalar(logger, 'learning_rate', learning_rate, global_step)
+            log_scalar(logger, 'epsilon', global_epsilon, global_step)
+
             if (episode + 1) % checkpoint_freq == 0:
                 if save_path is not None:
                     saver.save(sess, save_path=save_path + 'dqn-vanilla-' + env_name, global_step=global_step)
@@ -366,6 +382,7 @@ if __name__ == '__main__':
                            min_memory_size=FLAGS.min_memory_size,
                            max_memory_size=FLAGS.max_memory_size,
                            save_path=FLAGS.save_path,
+                           log_dir=FLAGS.log_dir,
                            render=FLAGS.render)
     else:
         score = test(env_name=FLAGS.env_name,
