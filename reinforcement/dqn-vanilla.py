@@ -6,25 +6,46 @@ import gym
 import time
 from collections import deque  # for replay memory
 
+# 1. create/replace save directory if it does/doesn't exist
+# 2. use "soft update" of target network?
+
+# 64,64
+# init_epsilon: 1.0
+# min_epsilon: 0.01
+# eps_decay: 0.995
+# 5e-4
+# memory: 100000
+# clone_steps: 10000
+# checkpoint freq: 100
+# render True
+
+# update_freq: number of actions between updates
+# lr_decay: learning rate decay
+# eps_decay: exploration rate decay
+
 
 tf.logging.set_verbosity(tf.logging.ERROR)
 
 FLAGS = tf.app.flags.FLAGS
 
 tf.app.flags.DEFINE_string('mode', 'train', """'Train' or 'test'.""")
+tf.app.flags.DEFINE_string('device', '/cpu:0', """'/cpu:0' or '/device:GPU:0'.""")
 tf.app.flags.DEFINE_string('env_name', 'CartPole-v0', """Gym environment.""")
 tf.app.flags.DEFINE_string('hidden_units', '64', """Size of hidden layers.""")
-tf.app.flags.DEFINE_float('lr', '1e-3', """Initial learning rate.""")
+tf.app.flags.DEFINE_float('learning_rate', 1e-3, """Initial learning rate.""")
+tf.app.flags.DEFINE_float('lr_decay', 0.995, """Learning decay rate.""")
+tf.app.flags.DEFINE_float('discount_factor', 0.99, """Discount factor in update.""")
 tf.app.flags.DEFINE_float('init_epsilon', 1.0, """Initial exploration rate.""")
-tf.app.flags.DEFINE_float('min_epsilon', 0.01, """Minimum exploration rate.""")
+tf.app.flags.DEFINE_float('min_epsilon', 0.1, """Minimum exploration rate.""")
+tf.app.flags.DEFINE_float('eps_decay', 0.995, """Exploration parameter decay rate.""")
 tf.app.flags.DEFINE_integer('batch_size', 32, """Examples per training update.""")
-tf.app.flags.DEFINE_integer('episodes', 1000, """Episodes per train/test routine.""")
+tf.app.flags.DEFINE_integer('episodes', 10000, """Episodes per train/test routine.""")
+tf.app.flags.DEFINE_integer('update_freq', 4, """Actions/steps between updates.""")
 tf.app.flags.DEFINE_integer('clone_steps', 1000, """Steps between cloning ops.""")
-tf.app.flags.DEFINE_integer('max_steps', 300, """Maximum steps per episode.""")
-tf.app.flags.DEFINE_integer('anneal_steps', 10000, """Steps per train/test routine.""")
+tf.app.flags.DEFINE_integer('max_steps', 1000, """Maximum steps per episode.""")
 tf.app.flags.DEFINE_integer('min_memory_size', 10000, """Minimum number of replay memories.""")
 tf.app.flags.DEFINE_integer('max_memory_size', 100000, """Maximum number of replay memories.""")
-tf.app.flags.DEFINE_integer('checkpoint_freq', 25, """Steps per checkpoint.""")
+tf.app.flags.DEFINE_integer('checkpoint_freq', 100, """Steps per checkpoint.""")
 tf.app.flags.DEFINE_string('save_path', './checkpoints/', """Checkpoint directory.""")
 tf.app.flags.DEFINE_string('load_path', './checkpoints/', """Checkpoint directory.""")
 tf.app.flags.DEFINE_boolean('render', False, """Render once per batch in training mode.""")
@@ -90,57 +111,65 @@ def sample_memory(memory, size):
     return states, actions, next_states, rewards, dones
 
 def train(env_name='CartPole-v0',
-          hidden_units=[64,32],
-          lr=1e-3,
+          device='/cpu:0',
+          hidden_units=[64,64],
+          learning_rate=1e-3,
+          lr_decay=0.995,
+          discount_factor=0.99,
           init_epsilon=1.0,
           min_epsilon=0.01,
-          batch_size=32,
+          eps_decay=0.995,
           episodes=1000,
+          update_freq=4,
+          batch_size=32,
           clone_steps=1000,
-          anneal_steps=10000,
-          max_steps=300,
+          max_steps=1000,
           min_memory_size=10000,
           max_memory_size=100000,
-          checkpoint_freq=25,
+          checkpoint_freq=100,
           save_path=None,
-          render=False):
+          render=True):
 
     # create an environment
     env = gym.make(env_name)
     n_dims = state_dimensions(env)
     n_actions = available_actions(env)
 
-    # create placeholders
-    states_pl = tf.placeholder(tf.float32, (None, n_dims))
-    actions_pl = tf.placeholder(tf.int32, (None, ))
-    targets_pl = tf.placeholder(tf.float32, (None, ))
+    with tf.device(device):
 
-    # initialize networks
-    action_values = mlp(states_pl, hidden_units + [n_actions], scope='value')
-    target_values = mlp(states_pl, hidden_units + [n_actions], scope='target')
-    # greedy_action = tf.math.argmax(action_values, axis=1)
-    # target_actions = tf.math.argmax(target_values, axis=1)
-    greedy_action = tf.arg_max(action_values, dimension=1)
-    target_actions = tf.arg_max(target_values, dimension=1)
-    value_mask = tf.one_hot(actions_pl, n_actions)
-    target_mask = tf.one_hot(target_actions, n_actions)
-    values = tf.reduce_sum(value_mask * action_values, axis=1)
-    targets = tf.reduce_sum(target_mask * target_values, axis=1)  # minus reward
+        print('constructing graph on device: {}'.format(device))
 
-    # define cloning operation
-    source = tf.get_default_graph().get_collection('trainable_variables', scope='value')
-    target = tf.get_default_graph().get_collection('trainable_variables', scope='target')
-    clone_ops = [tf.assign(t, s, name='clone') for t,s in zip(target, source)]
+        # create placeholders
+        states_pl = tf.placeholder(tf.float32, (None, n_dims))
+        actions_pl = tf.placeholder(tf.int32, (None, ))
+        targets_pl = tf.placeholder(tf.float32, (None, ))
 
-    # initialize replay memory
-    memory = create_replay_memory(env, min_memory_size, max_memory_size)
+        # initialize networks
+        action_values = mlp(states_pl, hidden_units + [n_actions], scope='value')
+        target_values = mlp(states_pl, hidden_units + [n_actions], scope='target')
+        # greedy_action = tf.math.argmax(action_values, axis=1)
+        # target_actions = tf.math.argmax(target_values, axis=1)
+        greedy_action = tf.arg_max(action_values, dimension=1)
+        target_actions = tf.arg_max(target_values, dimension=1)
+        value_mask = tf.one_hot(actions_pl, n_actions)
+        target_mask = tf.one_hot(target_actions, n_actions)
+        values = tf.reduce_sum(value_mask * action_values, axis=1)
+        targets = tf.reduce_sum(target_mask * target_values, axis=1)  # minus reward
 
-    # define training operation
-    loss = tf.losses.mean_squared_error(values, targets_pl)
-    train_op = tf.train.AdamOptimizer(learning_rate=lr).minimize(loss)
+        # define cloning operation
+        source = tf.get_default_graph().get_collection('trainable_variables', scope='value')
+        target = tf.get_default_graph().get_collection('trainable_variables', scope='target')
+        clone_ops = [tf.assign(t, s, name='clone') for t,s in zip(target, source)]
 
-    # create a saver
-    saver = tf.train.Saver()
+        # initialize replay memory
+        memory = create_replay_memory(env, min_memory_size, max_memory_size)
+
+        # define training operation
+        loss = tf.losses.mean_squared_error(values, targets_pl)
+        train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
+
+        # create a saver
+        saver = tf.train.Saver()
 
     def clone_network(sess):
         """Clone `action_values` network to `target_values`."""
@@ -156,7 +185,7 @@ def train(env_name='CartPole-v0',
         epsilon = init_epsilon - step * (init_epsilon - min_epsilon) / anneal_steps
         return np.maximum(min_epsilon, epsilon)
 
-    def run_episode(env, sess, global_step, global_epsilon, render=False, delay=0.01):
+    def run_episode(env, sess, global_step, global_epsilon, render=False, delay=0.0):
         state = env.reset()
         episode_reward = 0
         episode_steps = 0
@@ -180,36 +209,42 @@ def train(env_name='CartPole-v0',
             update_memory(memory, [state, action, next_state, reward, done], max_memory_size)
             state = next_state  # .copy() is only necessary if you modify the contents of next_state
 
-            # perform update
-            batch_states, batch_actions, batch_next_states, batch_rewards, batch_dones = sample_memory(memory, batch_size)
-            batch_targets = sess.run(targets,
-                feed_dict={
-                    states_pl: batch_next_states,
-                })
-            batch_targets = batch_rewards + ~batch_dones * batch_targets
-            sess.run([loss, train_op],
-                feed_dict={
-                    states_pl: batch_states,
-                    actions_pl: batch_actions,
-                    targets_pl: batch_targets
-                })
-
-            # update step count and clone
-            global_step += 1
-            if global_step % clone_steps == 0:
-                sess.run(clone_ops)
-                # print("Cloned action-value network!")
-
-            # update epsilon
-            global_epsilon = anneal_epsilon(global_step, init_epsilon,
-                                            min_epsilon, anneal_steps)
-
             # update episode totals
             episode_reward += reward
             episode_steps += 1
 
-            # check if you're done
-            if done or episode_steps == max_steps:
+            # perform update
+            if episode_steps % update_freq == 0:
+                batch_states, batch_actions, batch_next_states, batch_rewards, batch_dones = sample_memory(memory, batch_size)
+                batch_targets = sess.run(targets,
+                    feed_dict={
+                        states_pl: batch_next_states,
+                    })
+                batch_targets = batch_rewards + ~batch_dones * discount_factor * batch_targets
+                sess.run([loss, train_op],
+                    feed_dict={
+                        states_pl: batch_states,
+                        actions_pl: batch_actions,
+                        targets_pl: batch_targets
+                    })
+
+            # update global step count
+            global_step += 1
+
+            # update target network
+            if global_step % clone_steps == 0:
+                sess.run(clone_ops)
+                # print("updated target network")
+
+            # check if episode is done
+            if done:
+                global_epsilon = np.maximum(min_epsilon, global_epsilon * eps_decay)
+                # print("  > reward: {:.2f}, steps: {:d}".format(episode_reward, episode_steps))
+                break
+
+            if episode_steps == max_steps:
+                global_epsilon = np.maximum(min_epsilon, global_epsilon * eps_decay)
+                print("reached max_steps")
                 break
 
         return episode_reward, episode_steps, global_step, global_epsilon
@@ -220,23 +255,23 @@ def train(env_name='CartPole-v0',
         global_step = 0
         global_epsilon = init_epsilon
         t0 = time.time()
-        total_reward = 0
+        reward_history = []
         for episode in range(episodes):
             if (episode + 1) % checkpoint_freq == 0:
-                episode_reward, episode_steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=render)
+                reward, steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=render)  # optionally render one episode per checkpoint
             else:
-                episode_reward, episode_steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=False)
-            total_reward += episode_reward
+                reward, steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=False)
+            learning_rate = learning_rate * lr_decay
+            reward_history += [reward]
+            elapsed_time = time.time() - t0
+            avg_reward = np.mean(reward_history[-100:])
+            print('episode: {:d},  reward: {:.2f},  avg. reward: {:.2f},  steps:  {:d},  epsilon: {:.2f}, lr: {:.2e},  elapsed: {:.2f}'.format(episode + 1, reward, avg_reward, global_step, global_epsilon, learning_rate, elapsed_time))
             if (episode + 1) % checkpoint_freq == 0:
-                elapsed_time = time.time() - t0
-                mean_reward = total_reward / checkpoint_freq
-                print('episode: {:d},  reward: {:.2f},  (global) steps:  {:d},  (global) epsilon: {:.2f},  elapsed: {:.2f}'.format(episode + 1, mean_reward, global_step, global_epsilon, elapsed_time))
                 if save_path is not None:
                     saver.save(sess, save_path=save_path + 'dqn-vanilla-' + env_name, global_step=global_step)
-                total_reward = 0
         if save_path is not None:
             saver.save(sess, save_path=save_path + 'dqn-vanilla-' + env_name, global_step=global_step)
-        return saver.last_checkpoints
+        return reward_history, saver.last_checkpoints
 
 def find_latest_checkpoint(load_path, prefix):
     """Find the latest checkpoint in dir at `load_path` with prefix `prefix`
@@ -311,26 +346,29 @@ def test(env_name='CartPole-v0', hidden_units=[32], epsilon=0.01, episodes=100, 
         return rewards / episodes
 
 if __name__ == '__main__':
-    hidden_units = [int(i) for i in FLAGS.hidden_units.split(',')]
     if FLAGS.mode == 'train':
-        train(env_name=FLAGS.env_name,
-              hidden_units=hidden_units,
-              lr=FLAGS.lr,
-              init_epsilon=FLAGS.init_epsilon,
-              min_epsilon=FLAGS.min_epsilon,
-              batch_size=FLAGS.batch_size,
-              episodes=FLAGS.episodes,
-              clone_steps=FLAGS.clone_steps,
-              anneal_steps=FLAGS.anneal_steps,
-              max_steps=FLAGS.max_steps,
-              checkpoint_freq=FLAGS.checkpoint_freq,
-              min_memory_size=FLAGS.min_memory_size,
-              max_memory_size=FLAGS.max_memory_size,
-              save_path=FLAGS.save_path,
-              render=FLAGS.render)
+        rewards, _ = train(env_name=FLAGS.env_name,
+                           device=FLAGS.device,
+                           hidden_units=[int(i) for i in FLAGS.hidden_units.split(',')],
+                           learning_rate=FLAGS.learning_rate,
+                           lr_decay=FLAGS.lr_decay,
+                           discount_factor=FLAGS.discount_factor,
+                           init_epsilon=FLAGS.init_epsilon,
+                           min_epsilon=FLAGS.min_epsilon,
+                           eps_decay=FLAGS.eps_decay,
+                           episodes=FLAGS.episodes,
+                           update_freq=FLAGS.update_freq,
+                           batch_size=FLAGS.batch_size,
+                           clone_steps=FLAGS.clone_steps,
+                           max_steps=FLAGS.max_steps,
+                           checkpoint_freq=FLAGS.checkpoint_freq,
+                           min_memory_size=FLAGS.min_memory_size,
+                           max_memory_size=FLAGS.max_memory_size,
+                           save_path=FLAGS.save_path,
+                           render=FLAGS.render)
     else:
         score = test(env_name=FLAGS.env_name,
-                     hidden_units=hidden_units,
+                     hidden_units=[int(i) for i in FLAGS.hidden_units.split(',')],
                      epsilon=FLAGS.min_epsilon,
                      episodes=FLAGS.episodes,
                      load_path=FLAGS.load_path,
