@@ -338,6 +338,7 @@ def test(env_name='CartPole-v0', hidden_units=[32], epsilon=0.01, episodes=100, 
 
     with tf.Session() as sess:
         prefix = 'dqn-vanilla-' + env_name
+        print(find_latest_checkpoint(load_path, prefix))
         saver.restore(sess, find_latest_checkpoint(load_path, prefix))
         rewards = 0
         for i in range(episodes):
