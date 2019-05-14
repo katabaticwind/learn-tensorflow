@@ -170,6 +170,17 @@ def train(env_name='CartPole-v0',
             saver.save(sess, save_path=save_path + 'pg-baseline-' + env_name, global_step=global_step)
             return saver.last_checkpoints
 
+def find_latest_checkpoint(load_path, prefix):
+    """Find the latest checkpoint in dir at `load_path` with prefix `prefix`
+
+        E.g. ./checkpoints/dqn-vanilla-CartPole-v0-GLOBAL_STEP would use find_latest_checkpoint('./checkpoints/', 'dqn-vanilla-CartPole-v0')
+    """
+    files = os.listdir(load_path)
+    matches = [f for f in files if f.find(prefix) == 0]  # files starting with prefix
+    max_steps = np.max(np.unique([int(m.strip(prefix).split('.')[0]) for m in matches]))
+    latest_checkpoint = load_path + prefix + '-' + str(max_steps)
+    return latest_checkpoint
+
 def test(env_name='CartPole-v0',
          hidden_units=[32],
          episodes=100,
@@ -225,7 +236,8 @@ def test(env_name='CartPole-v0',
 
     # run test
     with tf.Session() as sess:
-        saver.restore(sess, load_path + 'pg-baseline-' + env_name)
+        prefix = 'pg-baseline-' + env_name
+        saver.restore(sess, find_latest_checkpoint(load_path, prefix))
         rewards = []
         for i in range(episodes):
             _, _, total_rewards = run_episode(env, sess, render=render)
@@ -246,6 +258,7 @@ if __name__ == '__main__':
         print('Checkpoint saved to {}'.format(checkpoint_file))
     elif FLAGS.mode == 'test':
         rewards = test(env_name=FLAGS.env_name,
+                       hidden_units=hidden_units,
                        episodes=FLAGS.episodes,
                        load_path=FLAGS.load_path,
                        render=FLAGS.render)
