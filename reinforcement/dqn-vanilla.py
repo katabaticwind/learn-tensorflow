@@ -5,6 +5,7 @@ import numpy as np
 import gym
 import time
 from collections import deque  # for replay memory
+from heapq import heapify
 
 from utils import create_directories
 
@@ -29,6 +30,7 @@ tf.app.flags.DEFINE_integer('clone_steps', 10000, """Steps between cloning ops."
 tf.app.flags.DEFINE_integer('max_steps', 1000, """Maximum steps per episode.""")
 tf.app.flags.DEFINE_integer('min_memory_size', 10000, """Minimum number of replay memories.""")
 tf.app.flags.DEFINE_integer('max_memory_size', 100000, """Maximum number of replay memories.""")
+tf.app.flags.DEFINE_boolean('prioritized', True, """Use prioritized replay?""")
 tf.app.flags.DEFINE_integer('ckpt_freq', 100, """Steps per checkpoint.""")
 tf.app.flags.DEFINE_string('base_dir', '.', """Base directory for checkpoints and logs.""")
 tf.app.flags.DEFINE_boolean('render', False, """Render episodes (once per `ckpt_freq` in training mode).""")
@@ -54,6 +56,46 @@ def mlp(x, sizes, activation=tf.tanh, output_activation=None, scope=''):
         for size in sizes[:-1]:
             x = tf.layers.dense(x, units=size, activation=activation)  # TODO: creates multiple warnings (DEPRECATED)
         return tf.layers.dense(x, units=sizes[-1], activation=output_activation)
+
+# TODO: re-do replay memory as priority queue using `heapq`
+"""
+    - `replay_memory` will be a priority queue implemented with heap queue algorithm.
+        - create by running `N` steps
+        - initial priority is equal to transition number
+    - divide the N values in queue into `batch_size` segments of equal probability
+    - sample batches uniform from each segment
+        - update priority of batches
+    - re-sort queue every 1e6 steps (since heapsort isn't "stable")
+"""
+def create_replay_memory(env, memory_size):
+    print('Creating replay memory...', end=' ')
+    t0 = time.time()
+    replay_memory = []
+    while len(replay_memory) < memory_size:
+        state = env.reset()
+        while True:
+            action = np.random.randint(env.action_space.n)
+            next_state, reward, done, info = env.step(action)
+            replay_memory.append((len(replay_memory), len(replay_memory), [state, action, reward, next_state, done]))
+            state = next_state
+            if done or len(replay_memory) == memory_size:
+                break
+    elapsed_time = time.time() - t0
+    print('done (elapsed time: {:.2f}).'.format(elapsed_time))
+    heapify(replay_memory)
+    return replay_memory
+
+def create_replay_memory_bins(memory_size, batch_size, alpha, beta):
+    """Create bins of equal probability."""
+    pass
+
+def sample_replay_memory(replay_memory, memory_bins, batch_size):
+    """Sample memories from replay memory uniformly from each bin."""
+
+    sample = []
+    for i in range(len(memory_bins)):
+        _, _, sample[i] = # uniformly random sample from bin i
+    return sample
 
 def create_replay_memory(env, min_memory_size, max_memory_size):
     """Initialize replay memory to `size`. Collect experience under random policy."""

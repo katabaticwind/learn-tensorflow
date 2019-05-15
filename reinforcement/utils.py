@@ -18,3 +18,12 @@ def create_directories(env_name, agent_name, base_dir = "."):
     os.makedirs(ckpt_dir)
     os.makedirs(log_dir)
     return ckpt_dir, log_dir
+
+def create_metadata(path, *kwargs):
+    """Create a metadata file describing checkpoint
+
+        The file should contain all of the arguments passed to the training method.
+
+        You can also include the Gym environment name and agent type to be sure.
+    """
+    
