@@ -6,23 +6,7 @@ import gym
 import time
 from collections import deque  # for replay memory
 
-# 1. create/replace save directory if it does/doesn't exist
-# 2. use "soft update" of target network?
-
-# 64,64
-# init_epsilon: 1.0
-# min_epsilon: 0.01
-# eps_decay: 0.995
-# 5e-4
-# memory: 100000
-# clone_steps: 10000
-# checkpoint freq: 100
-# render True
-
-# update_freq: number of actions between updates
-# lr_decay: learning rate decay
-# eps_decay: exploration rate decay
-
+from utils import create_directories
 
 tf.logging.set_verbosity(tf.logging.ERROR)
 
@@ -33,23 +17,21 @@ tf.app.flags.DEFINE_string('device', '/cpu:0', """'/cpu:0' or '/device:GPU:0'.""
 tf.app.flags.DEFINE_string('env_name', 'CartPole-v0', """Gym environment.""")
 tf.app.flags.DEFINE_string('hidden_units', '64', """Size of hidden layers.""")
 tf.app.flags.DEFINE_float('learning_rate', 1e-3, """Initial learning rate.""")
-tf.app.flags.DEFINE_float('lr_decay', 0.995, """Learning decay rate.""")
+tf.app.flags.DEFINE_float('lr_decay', 1.0, """Learning decay rate (per episode).""")
 tf.app.flags.DEFINE_float('discount_factor', 0.99, """Discount factor in update.""")
 tf.app.flags.DEFINE_float('init_epsilon', 1.0, """Initial exploration rate.""")
-tf.app.flags.DEFINE_float('min_epsilon', 0.1, """Minimum exploration rate.""")
-tf.app.flags.DEFINE_float('eps_decay', 0.995, """Exploration parameter decay rate.""")
+tf.app.flags.DEFINE_float('min_epsilon', 0.01, """Minimum exploration rate.""")
+tf.app.flags.DEFINE_float('eps_decay', 0.995, """Exploration parameter decay rate (per episode).""")
 tf.app.flags.DEFINE_integer('batch_size', 32, """Examples per training update.""")
-tf.app.flags.DEFINE_integer('episodes', 10000, """Episodes per train/test routine.""")
+tf.app.flags.DEFINE_integer('episodes', 10000, """Episodes per train/test.""")
 tf.app.flags.DEFINE_integer('update_freq', 4, """Actions/steps between updates.""")
-tf.app.flags.DEFINE_integer('clone_steps', 1000, """Steps between cloning ops.""")
+tf.app.flags.DEFINE_integer('clone_steps', 10000, """Steps between cloning ops.""")
 tf.app.flags.DEFINE_integer('max_steps', 1000, """Maximum steps per episode.""")
 tf.app.flags.DEFINE_integer('min_memory_size', 10000, """Minimum number of replay memories.""")
 tf.app.flags.DEFINE_integer('max_memory_size', 100000, """Maximum number of replay memories.""")
-tf.app.flags.DEFINE_integer('checkpoint_freq', 100, """Steps per checkpoint.""")
-tf.app.flags.DEFINE_string('save_path', './checkpoints/', """Checkpoint directory.""")
-tf.app.flags.DEFINE_string('load_path', './checkpoints/', """Checkpoint directory.""")
-tf.app.flags.DEFINE_string('log_dir', './logs/', """Log directory.""")
-tf.app.flags.DEFINE_boolean('render', False, """Render once per batch in training mode.""")
+tf.app.flags.DEFINE_integer('ckpt_freq', 100, """Steps per checkpoint.""")
+tf.app.flags.DEFINE_string('base_dir', '.', """Base directory for checkpoints and logs.""")
+tf.app.flags.DEFINE_boolean('render', False, """Render episodes (once per `ckpt_freq` in training mode).""")
 
 def available_actions(env):
     # if type(env.action_space) == gym.spaces.discrete.Discrete:
@@ -64,9 +46,7 @@ def state_dimensions(env):
 
 def mlp(x, sizes, activation=tf.tanh, output_activation=None, scope=''):
     """Build a feedforward neural network.
-
         - `scope`: used to distinguish target network from value network.
-
     """
     with tf.variable_scope(scope):
         for size in sizes[:-1]:
@@ -111,10 +91,10 @@ def sample_memory(memory, size):
     dones = np.array([b[4] for b in batch])
     return states, actions, next_states, rewards, dones
 
-def log_scalar(logger, tag, value, step):
+def log_scalar(writer, tag, value, step):
     value = [tf.Summary.Value(tag=tag, simple_value=value)]
     summary = tf.Summary(value=value)
-    logger.add_summary(summary, step)
+    writer.add_summary(summary, step)
 
 def train(env_name='CartPole-v0',
           device='/cpu:0',
@@ -132,10 +112,15 @@ def train(env_name='CartPole-v0',
           max_steps=1000,
           min_memory_size=10000,
           max_memory_size=100000,
-          checkpoint_freq=100,
-          save_path=None,
-          log_dir=None,
+          ckpt_freq=100,
+          base_dir=None,  # "."
           render=True):
+
+    # create log and checkpoint directories
+    if base_dir is not None:
+        ckpt_dir, log_dir = create_directories(env_name, "dqn-vanilla", base_dir=base_dir)
+    else:
+        ckpt_dir = log_dir = None
 
     # create an environment
     env = gym.make(env_name)
@@ -154,8 +139,6 @@ def train(env_name='CartPole-v0',
         # initialize networks
         action_values = mlp(states_pl, hidden_units + [n_actions], scope='value')
         target_values = mlp(states_pl, hidden_units + [n_actions], scope='target')
-        # greedy_action = tf.math.argmax(action_values, axis=1)
-        # target_actions = tf.math.argmax(target_values, axis=1)
         greedy_action = tf.arg_max(action_values, dimension=1)
         target_actions = tf.arg_max(target_values, dimension=1)
         value_mask = tf.one_hot(actions_pl, n_actions)
@@ -178,8 +161,8 @@ def train(env_name='CartPole-v0',
         # create a saver
         saver = tf.train.Saver()
 
-        # create logger
-        logger = tf.summary.FileWriter(log_dir)
+        # create writer
+        writer = tf.summary.FileWriter(log_dir)
 
     def clone_network(sess):
         """Clone `action_values` network to `target_values`."""
@@ -188,7 +171,6 @@ def train(env_name='CartPole-v0',
     def anneal_epsilon(step, init_epsilon=1.0, min_epsilon=0.1, anneal_steps=20000):
         """
             Linear annealing of `init_epsilon` to `min_epsilon` over `anneal_steps`.
-
             (Default `init_epsilon` and `min_epsilon` are the same as Mnih et al. 2015).
         """
 
@@ -267,7 +249,7 @@ def train(env_name='CartPole-v0',
         t0 = time.time()
         reward_history = []
         for episode in range(episodes):
-            if (episode + 1) % checkpoint_freq == 0:
+            if (episode + 1) % ckpt_freq == 0:
                 reward, steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=render)  # optionally render one episode per checkpoint
             else:
                 reward, steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=False)
@@ -278,29 +260,35 @@ def train(env_name='CartPole-v0',
             print('episode: {:d},  reward: {:.2f},  avg. reward: {:.2f},  steps:  {:d},  epsilon: {:.2f}, lr: {:.2e},  elapsed: {:.2f}'.format(episode + 1, reward, avg_reward, global_step, global_epsilon, learning_rate, elapsed_time))
 
             # logging
-            log_scalar(logger, 'reward', reward, global_step)
-            log_scalar(logger, 'learning_rate', learning_rate, global_step)
-            log_scalar(logger, 'epsilon', global_epsilon, global_step)
+            log_scalar(writer, 'reward', reward, global_step)
+            log_scalar(writer, 'learning_rate', learning_rate, global_step)
+            log_scalar(writer, 'epsilon', global_epsilon, global_step)
 
-            if (episode + 1) % checkpoint_freq == 0:
-                if save_path is not None:
-                    saver.save(sess, save_path=save_path + 'dqn-vanilla-' + env_name, global_step=global_step)
-        if save_path is not None:
-            saver.save(sess, save_path=save_path + 'dqn-vanilla-' + env_name, global_step=global_step)
-        return reward_history, saver.last_checkpoints
+            # checkpoint
+            if (episode + 1) % ckpt_freq == 0:
+                if ckpt_dir is not None:
+                    saver.save(sess, save_path=ckpt_dir + "/ckpt", global_step=global_step)
 
-def find_latest_checkpoint(load_path, prefix):
+        # final checkpoint
+        if ckpt_dir is not None:
+            saver.save(sess, save_path=ckpt_dir + "/ckpt", global_step=global_step)
+
+def find_latest_checkpoint(ckpt_dir, prefix="ckpt-"):
     """Find the latest checkpoint in dir at `load_path` with prefix `prefix`
-
-        E.g. ./checkpoints/dqn-vanilla-CartPole-v0-GLOBAL_STEP would use find_latest_checkpoint('./checkpoints/', 'dqn-vanilla-CartPole-v0')
+        E.g. ./checkpoints/CartPole-v0/dqn-vanilla/GLOBAL_STEP
     """
-    files = os.listdir(load_path)
+    files = os.listdir(ckpt_dir)
     matches = [f for f in files if f.find(prefix) == 0]  # files starting with prefix
     max_steps = np.max(np.unique([int(m.strip(prefix).split('.')[0]) for m in matches]))
-    latest_checkpoint = load_path + prefix + '-' + str(max_steps)
+    latest_checkpoint = ckpt_dir + prefix + str(max_steps)
     return latest_checkpoint
 
-def test(env_name='CartPole-v0', hidden_units=[32], epsilon=0.01, episodes=100, load_path=None, render=False):
+def test(env_name='CartPole-v0',
+         hidden_units=[32],
+         epsilon=0.01,
+         episodes=100,
+         restore_dir=None,
+         render=False):
 
     # create an environment
     env = gym.make(env_name)
@@ -353,9 +341,7 @@ def test(env_name='CartPole-v0', hidden_units=[32], epsilon=0.01, episodes=100, 
         return episode_reward, episode_steps
 
     with tf.Session() as sess:
-        prefix = 'dqn-vanilla-' + env_name
-        print(find_latest_checkpoint(load_path, prefix))
-        saver.restore(sess, find_latest_checkpoint(load_path, prefix))
+        saver.restore(sess, find_latest_checkpoint(restore_dir))
         rewards = 0
         for i in range(episodes):
             episode_rewards, _ = run_episode(env, sess, epsilon, render=render)
@@ -364,31 +350,29 @@ def test(env_name='CartPole-v0', hidden_units=[32], epsilon=0.01, episodes=100, 
 
 if __name__ == '__main__':
     if FLAGS.mode == 'train':
-        rewards, _ = train(env_name=FLAGS.env_name,
-                           device=FLAGS.device,
-                           hidden_units=[int(i) for i in FLAGS.hidden_units.split(',')],
-                           learning_rate=FLAGS.learning_rate,
-                           lr_decay=FLAGS.lr_decay,
-                           discount_factor=FLAGS.discount_factor,
-                           init_epsilon=FLAGS.init_epsilon,
-                           min_epsilon=FLAGS.min_epsilon,
-                           eps_decay=FLAGS.eps_decay,
-                           episodes=FLAGS.episodes,
-                           update_freq=FLAGS.update_freq,
-                           batch_size=FLAGS.batch_size,
-                           clone_steps=FLAGS.clone_steps,
-                           max_steps=FLAGS.max_steps,
-                           checkpoint_freq=FLAGS.checkpoint_freq,
-                           min_memory_size=FLAGS.min_memory_size,
-                           max_memory_size=FLAGS.max_memory_size,
-                           save_path=FLAGS.save_path,
-                           log_dir=FLAGS.log_dir,
-                           render=FLAGS.render)
+        train(env_name=FLAGS.env_name,
+              device=FLAGS.device,
+              hidden_units=[int(i) for i in FLAGS.hidden_units.split(',')],
+              learning_rate=FLAGS.learning_rate,
+              lr_decay=FLAGS.lr_decay,
+              discount_factor=FLAGS.discount_factor,
+              init_epsilon=FLAGS.init_epsilon,
+              min_epsilon=FLAGS.min_epsilon,
+              eps_decay=FLAGS.eps_decay,
+              episodes=FLAGS.episodes,
+              update_freq=FLAGS.update_freq,
+              batch_size=FLAGS.batch_size,
+              clone_steps=FLAGS.clone_steps,
+              max_steps=FLAGS.max_steps,
+              ckpt_freq=FLAGS.ckpt_freq,
+              min_memory_size=FLAGS.min_memory_size,
+              max_memory_size=FLAGS.max_memory_size,
+              base_dir=FLAGS.base_dir,
+              render=FLAGS.render)
     else:
-        score = test(env_name=FLAGS.env_name,
-                     hidden_units=[int(i) for i in FLAGS.hidden_units.split(',')],
-                     epsilon=FLAGS.min_epsilon,
-                     episodes=FLAGS.episodes,
-                     load_path=FLAGS.load_path,
-                     render=FLAGS.render)
-        print("> mean = {:.2f}".format(score))
+        test(env_name=FLAGS.env_name,
+             hidden_units=[int(i) for i in FLAGS.hidden_units.split(',')],
+             epsilon=FLAGS.min_epsilon,
+             episodes=FLAGS.episodes,
+             restore_dir=FLAGS.base_dir,
+             render=FLAGS.render)
