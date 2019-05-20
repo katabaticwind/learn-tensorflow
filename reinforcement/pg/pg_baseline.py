@@ -5,21 +5,24 @@ import numpy as np
 import gym
 import time
 from collections import deque
+
+from utils import find_latest_checkpoint, log_scalar, create_directories
+
 tf.logging.set_verbosity(tf.logging.ERROR)  # suppress annoying messages
 
-
 FLAGS = tf.app.flags.FLAGS
+
 tf.app.flags.DEFINE_string('mode', 'train', """'Train' or 'test'.""")
+tf.app.flags.DEFINE_string('device', '/cpu:0', """'/cpu:0' or '/device:GPU:0'.""")
 tf.app.flags.DEFINE_string('env_name', 'CartPole-v0', """Gym environment.""")
 tf.app.flags.DEFINE_string('hidden_units', '32', """Size of hidden layers.""")
 tf.app.flags.DEFINE_float('learning_rate', '1e-2', """Initial learning rate.""")
 tf.app.flags.DEFINE_integer('batches', 100, """Batches per training update.""")
 tf.app.flags.DEFINE_integer('batch_size', 5000, """Batches per training update.""")
 tf.app.flags.DEFINE_integer('episodes', 100, """Episodes per test.""")
-tf.app.flags.DEFINE_integer('checkpoint_freq', 10, """Batches between checkpoints.""")
-tf.app.flags.DEFINE_string('save_path', './checkpoints/', """Checkpoint directory.""")
-tf.app.flags.DEFINE_string('load_path', './checkpoints/', """Checkpoint directory.""")
-tf.app.flags.DEFINE_boolean('render', False, """Render once per batch in training mode.""")
+tf.app.flags.DEFINE_integer('ckpt_freq', 10, """Batches between checkpoints.""")
+tf.app.flags.DEFINE_string('base_dir', '.', """Base directory for checkpoints and logs.""")
+tf.app.flags.DEFINE_boolean('render', False, """Render episodes (once per batch in training mode).""")
 
 
 def available_actions(env):
@@ -50,46 +53,59 @@ def reward_to_go(rewards):
     return list(reversed(c))
 
 def train(env_name='CartPole-v0',
+          device='/cpu:0',
           hidden_units=[32],
           learning_rate=1e-2,
           batches=100,
           batch_size=5000,
-          save_path=None,
-          checkpoint_freq=10,
+          ckpt_freq=10,
+          base_dir=None,
           render=False):
+
+    # create log and checkpoint directories
+    if base_dir is not None:
+        ckpt_dir, log_dir = create_directories(env_name, "pg_baseline", base_dir=base_dir)
+    else:
+        ckpt_dir = log_dir = None
 
     # create an environment
     env = gym.make(env_name)
     n_dims = state_dimensions(env)
     n_actions = available_actions(env)
 
-    # create placeholders
-    states_pl = tf.placeholder(tf.float32, (None, n_dims))
-    actions_pl = tf.placeholder(tf.int32, (None, ))
-    weights_pl = tf.placeholder(tf.float32, (None, ))
+    with tf.device(device):
 
-    # create a policy network
-    logits = mlp(states_pl, hidden_units + [n_actions])
-    # actions = tf.squeeze(tf.random.categorical(logits=logits, num_samples=1), axis=1)  # chooses an action
-    actions = tf.squeeze(tf.multinomial(logits=logits, num_samples=1), axis=1)  # chooses an action
+        print('constructing graph on device: {}'.format(device))
 
-    # create a value network
-    values = mlp(states_pl, hidden_units + [1])
+        # create placeholders
+        states_pl = tf.placeholder(tf.float32, (None, n_dims))
+        actions_pl = tf.placeholder(tf.int32, (None, ))
+        weights_pl = tf.placeholder(tf.float32, (None, ))
 
-    # define policy network training operation
-    actions_mask = tf.one_hot(actions_pl, n_actions)
-    log_probs = tf.reduce_sum(actions_mask * tf.nn.log_softmax(logits), axis=1)  # use tf.mask instead?
-    policy_loss = -tf.reduce_mean((weights_pl - values) * log_probs)
-    policy_train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(policy_loss)  # TODO: creates tf.math_ops warning (?)
+        # create a policy network
+        logits = mlp(states_pl, hidden_units + [n_actions])
+        # actions = tf.squeeze(tf.random.categorical(logits=logits, num_samples=1), axis=1)  # chooses an action
+        actions = tf.squeeze(tf.multinomial(logits=logits, num_samples=1), axis=1)  # chooses an action
 
-    # define value network training operation
-    value_loss = tf.losses.mean_squared_error(weights_pl, tf.squeeze(values, axis=1))
-    value_train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(value_loss)
+        # create a value network
+        values = mlp(states_pl, hidden_units + [1])
 
-    # create a saver
-    saver = tf.train.Saver()
+        # define policy network training operation
+        actions_mask = tf.one_hot(actions_pl, n_actions)
+        log_probs = tf.reduce_sum(actions_mask * tf.nn.log_softmax(logits), axis=1)  # use tf.mask instead?
+        policy_loss = -tf.reduce_mean((weights_pl - values) * log_probs)
+        policy_train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(policy_loss)  # TODO: creates tf.math_ops warning (?)
 
-    # define core functions (NOTE: you could also define w/in session scope and drop sess arg)
+        # define value network training operation
+        value_loss = tf.losses.mean_squared_error(weights_pl, tf.squeeze(values, axis=1))
+        value_train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(value_loss)
+
+        # create a saver
+        saver = tf.train.Saver()
+
+        # create writer
+        writer = tf.summary.FileWriter(log_dir)
+
     def run_episode(env, sess, render=False):
         state = env.reset()
         episode_states = [state]
@@ -164,10 +180,20 @@ def train(env_name='CartPole-v0',
             _ = update_policy_network(batch_states, batch_actions, batch_weights, sess)
             global_step += batch_steps
             print("batch = {:d},  batch reward = {:.2f} (mean),  batch episodes = {:d}, batch time = {:.2f},  batch steps = {:.2f},  global steps = {:.2f}".format(batch, batch_rewards / batch_episodes, batch_episodes, batch_time, batch_steps, global_step))
-            if (save_path is not None) and (batch % checkpoint_freq == 0):
-                saver.save(sess, save_path=save_path + 'pg-baseline-' + env_name, global_step=global_step)
-        if (save_path is not None):
-            saver.save(sess, save_path=save_path + 'pg-baseline-' + env_name, global_step=global_step)
+
+            # logging
+            log_scalar(writer, 'batch_reward', batch_rewards / batch_episodes, global_step)
+            log_scalar(writer, 'batch_steps', batch_steps, global_step)
+            log_scalar(writer, 'learning_rate', learning_rate, global_step)
+
+            # checkpoint
+            if batch % ckpt_freq == 0:
+                if ckpt_dir is not None:
+                    saver.save(sess, save_path=ckpt_dir + "/ckpt", global_step=global_step)
+
+        # final checkpoint
+        if ckpt_dir is not None:
+            saver.save(sess, save_path=ckpt_dir + "/ckpt", global_step=global_step)
             return saver.last_checkpoints
 
 def find_latest_checkpoint(load_path, prefix):
@@ -184,16 +210,9 @@ def find_latest_checkpoint(load_path, prefix):
 def test(env_name='CartPole-v0',
          hidden_units=[32],
          episodes=100,
-         load_path=None,
+         restore_dir=None,
          render=False):
-    """
-    Load and test a trained model from checkpoint files.
-
-    **Note**: the `load_path` is the part of checkpoint file name *before* the extension. For example, if the checkpoint file name is 'model.index', then use 'model'.
-    """
-
-    if load_path is not None:
-        print('\nTesting environment {} with agent found in {}...'.format(env_name, load_path + 'pg-baseline-' + env_name))
+    """Load and test a trained model from checkpoint files."""
 
     # create an environment
     env = gym.make(env_name)
@@ -213,7 +232,7 @@ def test(env_name='CartPole-v0',
     saver = tf.train.Saver()
 
     # define core episode loop
-    def run_episode(env, sess, render=False):
+    def run_episode(env, sess, render=False, delay=0.01):
         state = env.reset()
         episode_states = [state]
         episode_actions = []
@@ -236,8 +255,7 @@ def test(env_name='CartPole-v0',
 
     # run test
     with tf.Session() as sess:
-        prefix = 'pg-baseline-' + env_name
-        saver.restore(sess, find_latest_checkpoint(load_path, prefix))
+        saver.restore(sess, find_latest_checkpoint(restore_dir))
         rewards = []
         for i in range(episodes):
             _, _, total_rewards = run_episode(env, sess, render=render)
@@ -248,12 +266,13 @@ if __name__ == '__main__':
     hidden_units = [int(i) for i in FLAGS.hidden_units.split(',')]
     if FLAGS.mode == 'train':
         checkpoint_file = train(env_name=FLAGS.env_name,
+                                device=FLAGS.device,
                                 hidden_units=hidden_units,
                                 learning_rate=FLAGS.learning_rate,
                                 batches=FLAGS.batches,
                                 batch_size=FLAGS.batch_size,
-                                checkpoint_freq=FLAGS.checkpoint_freq,
-                                save_path=FLAGS.save_path,
+                                ckpt_freq=FLAGS.ckpt_freq,
+                                base_dir=FLAGS.base_dir,
                                 render=FLAGS.render)
         print('Checkpoint saved to {}'.format(checkpoint_file))
     elif FLAGS.mode == 'test':
