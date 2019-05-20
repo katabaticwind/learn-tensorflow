@@ -33,6 +33,7 @@ tf.app.flags.DEFINE_integer('ckpt_freq', 100, """Steps per checkpoint.""")
 tf.app.flags.DEFINE_string('base_dir', '.', """Base directory for checkpoints and logs.""")
 tf.app.flags.DEFINE_boolean('render', False, """Render episodes (once per `ckpt_freq` in training mode).""")
 
+
 def available_actions(env):
     # if type(env.action_space) == gym.spaces.discrete.Discrete:
     try:
@@ -118,7 +119,7 @@ def train(env_name='CartPole-v0',
 
     # create log and checkpoint directories
     if base_dir is not None:
-        ckpt_dir, log_dir = create_directories(env_name, "dqn-vanilla", base_dir=base_dir)
+        ckpt_dir, log_dir = create_directories(env_name, "dqn_vanilla", base_dir=base_dir)
     else:
         ckpt_dir = log_dir = None
 
