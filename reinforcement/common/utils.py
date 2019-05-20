@@ -26,4 +26,19 @@ def create_metadata(path, *kwargs):
 
         You can also include the Gym environment name and agent type to be sure.
     """
-    
+
+def log_scalar(logger, tag, value, step):
+    value = [tf.Summary.Value(tag=tag, simple_value=value)]
+    summary = tf.Summary(value=value)
+    logger.add_summary(summary, step)
+
+def find_latest_checkpoint(load_path, prefix):
+    """Find the latest checkpoint in dir at `load_path` with prefix `prefix`
+
+        E.g. ./checkpoints/dqn-vanilla-CartPole-v0-GLOBAL_STEP would use find_latest_checkpoint('./checkpoints/', 'dqn-vanilla-CartPole-v0')
+    """
+    files = os.listdir(load_path)
+    matches = [f for f in files if f.find(prefix) == 0]  # files starting with prefix
+    max_steps = np.max(np.unique([int(m.strip(prefix).split('.')[0]) for m in matches]))
+    latest_checkpoint = load_path + prefix + '-' + str(max_steps)
+    return latest_checkpoint
