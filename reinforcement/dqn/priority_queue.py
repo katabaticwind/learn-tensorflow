@@ -1,6 +1,7 @@
 from heapq import heappush, heappush, heappop, heapify, heapreplace
 from collections import deque
 import numpy as np
+import time
 
 class Queue():
     """Basic FIFO queue."""
