@@ -91,7 +91,7 @@ def train(env_name='CartPole-v0',
 
     # create log and checkpoint directories
     if base_dir is not None:
-        ckpt_dir, log_dir = create_directories(env_name, "dqn-prioritized", base_dir=base_dir)
+        ckpt_dir, log_dir = create_directories(env_name, "dqn-rainbow", base_dir=base_dir)
     else:
         ckpt_dir = log_dir = None
 
@@ -288,7 +288,7 @@ def train(env_name='CartPole-v0',
 def find_latest_checkpoint(ckpt_dir, prefix="ckpt-"):
     """Find the latest checkpoint in dir at `load_path` with prefix `prefix`
 
-        E.g. ./checkpoints/CartPole-v0/dqn-prioritized/GLOBAL_STEP
+        E.g. ./checkpoints/CartPole-v0/dqn-rainbow/GLOBAL_STEP
     """
     files = os.listdir(ckpt_dir)
     matches = [f for f in files if f.find(prefix) == 0]  # files starting with prefix
