@@ -6,7 +6,7 @@ import gym
 import time
 
 from utils import create_directories
-from priority_queue import PriorityQueue, unpack_batch
+from priority_queue import Queue, PriorityQueue, unpack_batch
 
 tf.logging.set_verbosity(tf.logging.ERROR)
 
@@ -63,6 +63,9 @@ def log_scalar(writer, tag, value, step):
     summary = tf.Summary(value=value)
     writer.add_summary(summary, step)
 
+def discounted_sum(values, discount_factor):
+    return np.sum(values * discount_factor ** np.arange(0, len(values)))
+
 def train(env_name='CartPole-v0',
           device='/cpu:0',
           hidden_units=[64,64],
@@ -97,6 +100,7 @@ def train(env_name='CartPole-v0',
     n_dims = state_dimensions(env)
     n_actions = available_actions(env)
 
+    # define a graph
     with tf.device(device):
 
         print('constructing graph on device: {}'.format(device))
@@ -126,7 +130,8 @@ def train(env_name='CartPole-v0',
         replay_memory = PriorityQueue(env, memory_size, replay_alpha, replay_beta, batch_size)
 
         # define training operation
-        errors = tf.math.abs(targets_pl - values)
+        # errors = tf.math.abs(targets_pl - values)
+        errors = tf.abs(targets_pl - values)
         loss = tf.losses.mean_squared_error(values, targets_pl, weights=weights_pl)
         train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
 
@@ -154,6 +159,9 @@ def train(env_name='CartPole-v0',
         state = env.reset()
         episode_reward = 0
         episode_steps = 0
+        reward_queue = Queue(update_freq)
+        action_queue = Queue(update_freq)
+        state_queue = Queue(update_freq + 1, [state])
         if render == True:
             env.render()
             time.sleep(delay)
@@ -163,6 +171,7 @@ def train(env_name='CartPole-v0',
                 action = np.random.randint(env.action_space.n)
             else:
                 action = sess.run(greedy_action, feed_dict={states_pl: state.reshape(1, -1)})[0]
+            action_queue.push(action)
 
             # take a step
             next_state, reward, done, info = env.step(action)
@@ -170,10 +179,19 @@ def train(env_name='CartPole-v0',
                 env.render()
                 time.sleep(delay)
 
+            # update queues
+            reward_queue.push(reward)
+            state_queue.push(next_state)
+
             # save transition to memory
-            memory = [state, action, reward, next_state, done]
-            replay_memory.add_memory(memory, global_step)  # stored w/ maximal priority
-            state = next_state  # .copy() is only necessary if you modify the contents of next_state
+            if len(state_queue) == update_freq + 1:
+                memory = [state_queue.queue[0],
+                          action_queue.queue[0],
+                          discounted_sum(reward_queue.queue, discount_factor),
+                          state_queue.queue[-1],
+                          done]
+                replay_memory.add_memory(memory, global_step)  # stored w/ maximal priority
+                state = next_state  # .copy() is only necessary if you modify the contents of next_state
 
             # update episode totals
             episode_reward += reward

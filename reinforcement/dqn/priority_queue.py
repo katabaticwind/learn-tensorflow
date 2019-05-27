@@ -1,48 +1,25 @@
 from heapq import heappush, heappush, heappop, heapify, heapreplace
+from collections import deque
 import numpy as np
 
-class BasicQueue():
-    """docstring for BasicQueue."""
+class Queue():
+    """Basic FIFO queue."""
 
-    def __init__(self, size):
+    def __init__(self, size, init_values=[]):
+        assert len(init_values) <= size, "Initial values exceed queue length."
         self.size = size
-        self.queue = deque()
+        self.queue = deque(init_values)
 
-    def create_replay_memory(self, env):
-        """Initialize replay memory to `size`. Collect experience under random policy."""
+    def __len__(self):
+        return len(self.queue)
 
-        print('Creating replay memory...')
-        t0 = time.time()
-        while len(self.queue) < self.size:
-            state = env.reset()
-            while True:
-                action = np.random.randint(env.action_space.n)
-                next_state, reward, done, info = env.step(action)
-                self.add_memory(memory, [state, action, next_state, reward, done], self.size)
-                state = next_state
-                if done or len(self.queue) == self.size:
-                    break
-        elapsed_time = time.time() - t0
-        print('done (elapsed time: {:.2f})'.format(elapsed_time))
-
-    def add_memory(self, memory):
+    def push(self, value):
         """Add a memory to queue."""
         if len(self.queue) == self.size:
-            self.queue.popleft()  # trash oldest memory
-            self.queue.append(memory)
+            self.queue.popleft()
+            self.queue.append(value)
         else:
-            self.queue.append(memory)
-
-    def sample_queue(self, batch_size):
-        """Sample `size` transitions from `memory` uniformly"""
-        idx = np.random.choice(range(len(self.queue)), batch_size)
-        batch = [self.queue[i] for i in idx]
-        states = np.array([b[0] for b in batch])
-        actions = np.array([b[1] for b in batch])
-        next_states = np.array([b[2] for b in batch])
-        rewards = np.array([b[3] for b in batch])
-        dones = np.array([b[4] for b in batch])
-        return states, actions, next_states, rewards, dones
+            self.queue.append(value)
 
 class PriorityQueue():
     """Implementation of priority queue.
