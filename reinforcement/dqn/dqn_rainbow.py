@@ -88,7 +88,7 @@ def train(env_name='CartPole-v0',
 
     # create log and checkpoint directories
     if base_dir is not None:
-        ckpt_dir, log_dir = create_directories(env_name, "dqn-prioritized", base_dir=base_dir)
+        ckpt_dir, log_dir = create_directories(env_name, "dqn-rainbow", base_dir=base_dir)
     else:
         ckpt_dir = log_dir = None
 
@@ -126,7 +126,8 @@ def train(env_name='CartPole-v0',
         replay_memory = PriorityQueue(env, memory_size, replay_alpha, replay_beta, batch_size)
 
         # define training operation
-        errors = tf.math.abs(targets_pl - values)
+        # errors = tf.math.abs(targets_pl - values)
+        errors = tf.abs(targets_pl - values)
         loss = tf.losses.mean_squared_error(values, targets_pl, weights=weights_pl)
         train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
 
@@ -270,7 +271,7 @@ def train(env_name='CartPole-v0',
 def find_latest_checkpoint(ckpt_dir, prefix="ckpt-"):
     """Find the latest checkpoint in dir at `load_path` with prefix `prefix`
 
-        E.g. ./checkpoints/CartPole-v0/dqn-prioritized/GLOBAL_STEP
+        E.g. ./checkpoints/CartPole-v0/dqn-rainbow/GLOBAL_STEP
     """
     files = os.listdir(ckpt_dir)
     matches = [f for f in files if f.find(prefix) == 0]  # files starting with prefix
