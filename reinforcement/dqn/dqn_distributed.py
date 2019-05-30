@@ -23,7 +23,7 @@ tf.app.flags.DEFINE_float('init_epsilon', 1.0, """Initial exploration rate.""")
 tf.app.flags.DEFINE_float('min_epsilon', 0.01, """Minimum exploration rate.""")
 tf.app.flags.DEFINE_float('eps_decay', 0.995, """Exploration parameter decay rate (per episode).""")
 
-tf.app.flags.DEFINE_integer('atoms', 50, """Number of atoms in value distribution.""")
+tf.app.flags.DEFINE_integer('n_atoms', 50, """Number of n_atoms in value distribution.""")
 tf.app.flags.DEFINE_float('zmin', -1.0, """Minimum of value distribution.""")
 tf.app.flags.DEFINE_float('zmax', 1.0, """Maximum of value distribution.""")
 
@@ -102,6 +102,12 @@ def log_scalar(writer, tag, value, step):
     summary = tf.Summary(value=value)
     writer.add_summary(summary, step)
 
+def update_p_target(p_target, indices, values):
+    for i in range(p_target.shape[0]):
+        for (j, v) in zip(indices[i, :], values[i, :]):
+            p_target[i, j] += v
+    return p_target
+
 def train(env_name='CartPole-v0',
           device='/cpu:0',
           hidden_units=[64,64],
@@ -111,6 +117,9 @@ def train(env_name='CartPole-v0',
           init_epsilon=1.0,
           min_epsilon=0.01,
           eps_decay=0.995,
+          n_atoms=50,
+          zmin=-1.0,
+          zmax=1.0,
           episodes=1000,
           update_freq=4,
           batch_size=32,
@@ -133,6 +142,9 @@ def train(env_name='CartPole-v0',
     n_dims = state_dimensions(env)
     n_actions = available_actions(env)
 
+    # determine value distribution grid
+    values_grid, values_step = np.linspace(zmin, zmax, n_atoms, retstep=True)
+
     with tf.device(device):
 
         print('constructing graph on device: {}'.format(device))
@@ -140,20 +152,65 @@ def train(env_name='CartPole-v0',
         # create placeholders
         states_pl = tf.placeholder(tf.float32, (None, n_dims))
         actions_pl = tf.placeholder(tf.int32, (None, ))
-        targets_pl = tf.placeholder(tf.float32, (None, ))
+        rewards_pl = tf.placeholder(tf.float32, (None, ))
+        next_states_pl = tf.placeholder(tf.float32, (None, n_dims))
+        p_target_pl = tf.placeholder(tf.float32, (None, n_atoms))
+        values_pl = tf.constant(values_grid, tf.float32)  # (n_atoms,)
 
         # initialize networks
-        action_values = mlp(states_pl, hidden_units + [n_actions], scope='value')
-        target_values = mlp(states_pl, hidden_units + [n_actions], scope='target')
-        greedy_action = tf.arg_max(action_values, dimension=1)
-        target_actions = tf.arg_max(target_values, dimension=1)
-        value_mask = tf.one_hot(actions_pl, n_actions)
-        target_mask = tf.one_hot(target_actions, n_actions)
-        values = tf.reduce_sum(value_mask * action_values, axis=1)
-        targets = tf.reduce_sum(target_mask * target_values, axis=1)  # minus reward
+        logits_estimate = tf.reshape(
+            mlp(states_pl, hidden_units + [n_actions * n_atoms], scope='estimate'),
+            [-1, n_actions, n_atoms]
+        )
+        logits_target = tf.reshape(
+            mlp(next_states_pl, hidden_units + [n_actions * n_atoms], scope='target'),
+            [-1, n_actions, n_atoms]
+        )
+
+        P_estimate = tf.nn.softmax(logits_estimate)  # axis=-1
+        P_target = tf.nn.softmax(logits_target)
+
+        Q_estimate = tf.reduce_sum(P_estimate * values_pl, axis=-1)
+        Q_target = tf.reduce_sum(P_target * values_pl, axis=-1)
+
+        # Q_estimate = tf.reshape(
+        #     tf.matmul(P_estimate, tf.reshape(values_pl, (-1, n_atoms, 1))), (-1, n_actions)
+        # )
+        # Q_target = tf.reshape(
+        #     tf.matmul(P_target, tf.reshape(values_pl, (-1, n_atoms, 1))), (-1, n_actions)
+        # )
+
+        greedy_action = tf.arg_max(Q_estimate, dimension=1)
+        target_actions = tf.arg_max(Q_target, dimension=1)
+
+        mask_estimate = tf.one_hot(actions_pl, n_actions)
+        mask_target = tf.one_hot(target_actions, n_actions)
+
+        p_estimate = tf.reduce_sum(
+            P_estimate * tf.broadcast_to(mask_estimate, [n_actions, n_atoms]),
+            axis=1
+        )
+        p_target_raw = tf.reduce_sum(  # target probabilities corresponding to target values (i.e. before projection)  [None, n_atoms]
+            P_target * tf.broadcast_to(mask_target, [n_actions, n_atoms]),
+            axis=1
+        )
+
+        # values_target = tf.clip_by_value(rewards_pl + discount_factor * values_pl, zmin, zmax)  # clip to (zmin, zmax)
+        # b = values_target / values_step
+        # u = tf.cast(tf.ceil(b), tf.int32)
+        # l = tf.cast(tf.floor(b), tf.int32)
+
+        # p_target = p_target_pl + tf.reduce_sum((tf.cast(u, tf.float32) - b) * p_target_raw * tf.one_hot(l, n_atoms, axis=1), axis=-1)
+        # p_target = p_target + tf.reduce_sum((b - tf.cast(l, tf.float32)) * p_target_raw * tf.one_hot(u, n_atoms, axis=1), axis=-1)
+
+        # p_target[l] += (u - b) * p_target_raw
+        # p_target[u] += (b - l) * p_target_raw
+        # loss = tf.losses.cross_entropy(p_target, p_estimate)
+        loss = tf.reduce_mean(-tf.reduce_sum(p_target * tf.log(p_estimate), axis=-1))  # cross-entropy loss
+
 
         # define cloning operation
-        source = tf.get_default_graph().get_collection('trainable_variables', scope='value')
+        source = tf.get_default_graph().get_collection('trainable_variables', scope='estimate')
         target = tf.get_default_graph().get_collection('trainable_variables', scope='target')
         clone_ops = [tf.assign(t, s, name='clone') for t,s in zip(target, source)]
 
@@ -161,7 +218,7 @@ def train(env_name='CartPole-v0',
         memory = create_replay_memory(env, min_memory_size, max_memory_size)
 
         # define training operation
-        loss = tf.losses.mean_squared_error(values, targets_pl)
+        # loss = tf.losses.mean_squared_error(values, targets_pl)
         train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
 
         # create a saver
@@ -214,16 +271,26 @@ def train(env_name='CartPole-v0',
             # perform update
             if episode_steps % update_freq == 0:
                 batch_states, batch_actions, batch_next_states, batch_rewards, batch_dones = sample_memory(memory, batch_size)
-                batch_targets = sess.run(targets,
+                batch_p_target_raw = sess.run(p_target_raw,
                     feed_dict={
-                        states_pl: batch_next_states,
-                    })
-                batch_targets = batch_rewards + ~batch_dones * discount_factor * batch_targets
+                        next_states_pl: batch_next_states,
+                    })  # [batch_size, n_atoms]
+
+                # project p_target_raw onto grid...
+                values_target = np.clip(batch_rewards + ~batch_dones * discount_factor * values_grid, zmin, zmax)
+                b = values_target / values_step  # b ∈ [0, n_atoms - 1]
+                u = int(np.ceil(b))
+                l = int(np.floor(b))
+                batch_p_target = np.zeros([batch_size, n_atoms])
+                batch_p_target = update_p_target(batch_p_target, u, (b - l) * batch_p_target_raw)
+                batch_p_target = update_p_target(batch_p_target, l, (u - b) * batch_p_target_raw)
+
+                # update
                 sess.run([loss, train_op],
                     feed_dict={
                         states_pl: batch_states,
                         actions_pl: batch_actions,
-                        targets_pl: batch_targets
+                        p_targets_pl: batch_p_targets
                     })
 
             # update global step count
