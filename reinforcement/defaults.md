@@ -10,6 +10,12 @@ Default settings for various reinforcement learning algorithms and tasks.
   - hidden_units: 64
   - learning_rate: 1e-3
   - clone_steps: 1000
+- ### `dqn-rainbow`
+  - hidden_units: 64
+  - learning_rate: 1e-2
+  - memory_size: 10000
+  - clone_steps: 1000
+  - sort_freq: 1000
 
 ## LunarLander-v2
 - ### `pg-baseline`
