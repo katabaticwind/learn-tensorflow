@@ -140,12 +140,21 @@ def train(env_name='CartPole-v0',
         # initialize networks
         action_values = mlp(states_pl, hidden_units + [n_actions], scope='value')
         target_values = mlp(states_pl, hidden_units + [n_actions], scope='target')
+        tf.summary.histogram('action_values', action_values)
+        tf.summary.histogram('target_values', target_values)
         greedy_action = tf.arg_max(action_values, dimension=1)
         target_actions = tf.arg_max(target_values, dimension=1)
+        # tf.summary.histogram('greedy_actions', actions_pl)
+        tf.summary.histogram('target_actions', target_actions)
         value_mask = tf.one_hot(actions_pl, n_actions)
         target_mask = tf.one_hot(target_actions, n_actions)
         values = tf.reduce_sum(value_mask * action_values, axis=1)
         targets = tf.reduce_sum(target_mask * target_values, axis=1)  # minus reward
+        # tf.summary.histogram('values', values)
+        tf.summary.histogram('targets', targets)
+
+        # merge summary ops
+        summary_ops = tf.summary.merge_all()
 
         # define cloning operation
         source = tf.get_default_graph().get_collection('trainable_variables', scope='value')
@@ -161,9 +170,6 @@ def train(env_name='CartPole-v0',
 
         # create a saver
         saver = tf.train.Saver()
-
-        # create writer
-        writer = tf.summary.FileWriter(log_dir)
 
     def clone_network(sess):
         """Clone `action_values` network to `target_values`."""
@@ -209,17 +215,19 @@ def train(env_name='CartPole-v0',
             # perform update
             if episode_steps % update_freq == 0:
                 batch_states, batch_actions, batch_next_states, batch_rewards, batch_dones = sample_memory(memory, batch_size)
-                batch_targets = sess.run(targets,
+                summary_target, batch_targets = sess.run([summary_ops, targets],
                     feed_dict={
                         states_pl: batch_next_states,
                     })
                 batch_targets = batch_rewards + ~batch_dones * discount_factor * batch_targets
-                sess.run([loss, train_op],
+                summary_estimate, _, _ = sess.run([summary_ops, loss, train_op],
                     feed_dict={
                         states_pl: batch_states,
                         actions_pl: batch_actions,
                         targets_pl: batch_targets
                     })
+                writer.add_summary(summary_target, global_step)
+                writer.add_summary(summary_estimate, global_step)
 
             # update global step count
             global_step += 1
@@ -245,6 +253,7 @@ def train(env_name='CartPole-v0',
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
         sess.run(clone_ops)  # set networks equal to begin
+        writer = tf.summary.FileWriter(log_dir, sess.graph)  # create writer for logging
         global_step = 0
         global_epsilon = init_epsilon
         t0 = time.time()
