@@ -22,11 +22,9 @@ tf.app.flags.DEFINE_float('discount_factor', 0.99, """Discount factor in update 
 tf.app.flags.DEFINE_float('init_epsilon', 1.0, """Initial exploration rate.""")
 tf.app.flags.DEFINE_float('min_epsilon', 0.01, """Minimum exploration rate.""")
 tf.app.flags.DEFINE_float('eps_decay', 0.995, """Exploration parameter decay rate (per episode).""")
-
 tf.app.flags.DEFINE_integer('n_atoms', 50, """Number of n_atoms in value distribution.""")
 tf.app.flags.DEFINE_float('zmin', -1.0, """Minimum of value distribution.""")
 tf.app.flags.DEFINE_float('zmax', 1.0, """Maximum of value distribution.""")
-
 tf.app.flags.DEFINE_integer('batch_size', 32, """Examples per training update.""")
 tf.app.flags.DEFINE_integer('episodes', 10000, """Episodes per train/test.""")
 tf.app.flags.DEFINE_integer('update_freq', 4, """Actions/steps between updates.""")
@@ -118,8 +116,8 @@ def train(env_name='CartPole-v0',
           min_epsilon=0.01,
           eps_decay=0.995,
           n_atoms=50,
-          zmin=-1.0,
-          zmax=1.0,
+          zmin=-10.0,
+          zmax=10.0,
           episodes=1000,
           update_freq=4,
           batch_size=32,
@@ -133,7 +131,7 @@ def train(env_name='CartPole-v0',
 
     # create log and checkpoint directories
     if base_dir is not None:
-        ckpt_dir, log_dir = create_directories(env_name, "dqn_vanilla", base_dir=base_dir)
+        ckpt_dir, log_dir = create_directories(env_name, "dqn_distributed", base_dir=base_dir)
     else:
         ckpt_dir = log_dir = None
 
@@ -187,11 +185,13 @@ def train(env_name='CartPole-v0',
         mask_target = tf.one_hot(target_actions, n_actions)
 
         p_estimate = tf.reduce_sum(
-            P_estimate * tf.broadcast_to(mask_estimate, [n_actions, n_atoms]),
+            P_estimate * tf.tile(tf.reshape(mask_estimate, [-1, 2, 1]), [1, 1, n_atoms]),
+            # P_estimate * tf.broadcast_to(mask_estimate, [n_actions, n_atoms]),
             axis=1
         )
         p_target_raw = tf.reduce_sum(  # target probabilities corresponding to target values (i.e. before projection)  [None, n_atoms]
-            P_target * tf.broadcast_to(mask_target, [n_actions, n_atoms]),
+            P_target * tf.tile(tf.reshape(mask_target, [-1, 2, 1]), [1, 1, n_atoms]),
+            # P_target * tf.broadcast_to(mask_target, [n_actions, n_atoms]),
             axis=1
         )
 
@@ -206,8 +206,14 @@ def train(env_name='CartPole-v0',
         # p_target[l] += (u - b) * p_target_raw
         # p_target[u] += (b - l) * p_target_raw
         # loss = tf.losses.cross_entropy(p_target, p_estimate)
-        loss = tf.reduce_mean(-tf.reduce_sum(p_target * tf.log(p_estimate), axis=-1))  # cross-entropy loss
+        loss = tf.reduce_mean(-tf.reduce_sum(p_target_pl * tf.log(p_estimate), axis=-1))  # TODO: use stable cross-entropy loss!
 
+        # merge summaries
+        tf.summary.histogram('actions_pl', actions_pl)
+        tf.summary.histogram('p_estimate', p_estimate)
+        tf.summary.histogram('Q_estimate', Q_estimate)
+        tf.summary.scalar('loss', loss)
+        summary_op = tf.summary.merge_all()
 
         # define cloning operation
         source = tf.get_default_graph().get_collection('trainable_variables', scope='estimate')
@@ -223,9 +229,6 @@ def train(env_name='CartPole-v0',
 
         # create a saver
         saver = tf.train.Saver()
-
-        # create writer
-        writer = tf.summary.FileWriter(log_dir)
 
     def clone_network(sess):
         """Clone `action_values` network to `target_values`."""
@@ -277,21 +280,27 @@ def train(env_name='CartPole-v0',
                     })  # [batch_size, n_atoms]
 
                 # project p_target_raw onto grid...
-                values_target = np.clip(batch_rewards + ~batch_dones * discount_factor * values_grid, zmin, zmax)
-                b = values_target / values_step  # b ∈ [0, n_atoms - 1]
-                u = int(np.ceil(b))
-                l = int(np.floor(b))
+                batch_values = np.repeat(values_grid.reshape(1, n_atoms), batch_size, 0)
+                batch_rewards = np.reshape(batch_rewards, (batch_size, 1))
+                batch_dones = np.reshape(batch_dones, (batch_size, 1))
+                values_target = np.clip(batch_rewards + ~batch_dones * discount_factor * batch_values, zmin, zmax)
+                b = (values_target - zmin) / values_step  # b ∈ [0, n_atoms - 1]
+                u = np.ceil(b).astype('int')
+                l = np.floor(b).astype('int')
                 batch_p_target = np.zeros([batch_size, n_atoms])
                 batch_p_target = update_p_target(batch_p_target, u, (b - l) * batch_p_target_raw)
                 batch_p_target = update_p_target(batch_p_target, l, (u - b) * batch_p_target_raw)
 
                 # update
-                sess.run([loss, train_op],
+                summary, _, _ = sess.run([summary_op, loss, train_op],
                     feed_dict={
                         states_pl: batch_states,
                         actions_pl: batch_actions,
-                        p_targets_pl: batch_p_targets
+                        p_target_pl: batch_p_target
                     })
+
+                # write log
+                writer.add_summary(summary, global_step)
 
             # update global step count
             global_step += 1
@@ -317,6 +326,7 @@ def train(env_name='CartPole-v0',
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
         sess.run(clone_ops)  # set networks equal to begin
+        writer = tf.summary.FileWriter(log_dir, sess.graph)  # create writer
         global_step = 0
         global_epsilon = init_epsilon
         t0 = time.time()
@@ -348,7 +358,7 @@ def train(env_name='CartPole-v0',
 
 def find_latest_checkpoint(ckpt_dir, prefix="ckpt-"):
     """Find the latest checkpoint in dir at `load_path` with prefix `prefix`
-        E.g. ./checkpoints/CartPole-v0/dqn-vanilla/GLOBAL_STEP
+        E.g. ./checkpoints/CartPole-v0/dqn_distributed/GLOBAL_STEP
     """
     files = os.listdir(ckpt_dir)
     matches = [f for f in files if f.find(prefix) == 0]  # files starting with prefix
@@ -432,6 +442,9 @@ if __name__ == '__main__':
               init_epsilon=FLAGS.init_epsilon,
               min_epsilon=FLAGS.min_epsilon,
               eps_decay=FLAGS.eps_decay,
+              n_atoms=FLAGS.n_atoms,
+              zmin=FLAGS.zmin,
+              zmax=FLAGS.zmax,
               episodes=FLAGS.episodes,
               update_freq=FLAGS.update_freq,
               batch_size=FLAGS.batch_size,
