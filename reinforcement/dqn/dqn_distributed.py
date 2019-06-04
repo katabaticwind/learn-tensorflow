@@ -22,7 +22,7 @@ tf.app.flags.DEFINE_float('discount_factor', 0.99, """Discount factor in update 
 tf.app.flags.DEFINE_float('init_epsilon', 1.0, """Initial exploration rate.""")
 tf.app.flags.DEFINE_float('min_epsilon', 0.01, """Minimum exploration rate.""")
 tf.app.flags.DEFINE_float('eps_decay', 0.995, """Exploration parameter decay rate (per episode).""")
-tf.app.flags.DEFINE_integer('n_atoms', 50, """Number of n_atoms in value distribution.""")
+tf.app.flags.DEFINE_integer('n_atoms', 51, """Number of n_atoms in value distribution.""")
 tf.app.flags.DEFINE_float('zmin', -1.0, """Minimum of value distribution.""")
 tf.app.flags.DEFINE_float('zmax', 1.0, """Maximum of value distribution.""")
 tf.app.flags.DEFINE_integer('batch_size', 32, """Examples per training update.""")
@@ -115,7 +115,7 @@ def train(env_name='CartPole-v0',
           init_epsilon=1.0,
           min_epsilon=0.01,
           eps_decay=0.995,
-          n_atoms=50,
+          n_atoms=51,  # 50 segments
           zmin=-10.0,
           zmax=10.0,
           episodes=1000,
@@ -185,12 +185,12 @@ def train(env_name='CartPole-v0',
         mask_target = tf.one_hot(target_actions, n_actions)
 
         p_estimate = tf.reduce_sum(
-            P_estimate * tf.tile(tf.reshape(mask_estimate, [-1, 2, 1]), [1, 1, n_atoms]),
+            P_estimate * tf.tile(tf.reshape(mask_estimate, [-1, n_actions, 1]), [1, 1, n_atoms]),
             # P_estimate * tf.broadcast_to(mask_estimate, [n_actions, n_atoms]),
             axis=1
         )
         p_target_raw = tf.reduce_sum(  # target probabilities corresponding to target values (i.e. before projection)  [None, n_atoms]
-            P_target * tf.tile(tf.reshape(mask_target, [-1, 2, 1]), [1, 1, n_atoms]),
+            P_target * tf.tile(tf.reshape(mask_target, [-1, n_actions, 1]), [1, 1, n_atoms]),
             # P_target * tf.broadcast_to(mask_target, [n_actions, n_atoms]),
             axis=1
         )
