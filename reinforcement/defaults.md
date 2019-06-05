@@ -36,6 +36,3 @@ Default settings for various reinforcement learning algorithms and tasks.
   - clone_steps: 1e4
   - min_memory_size: 1e4
   - max_memory_size: 1e5
-
-
-  python dqn-vanilla.py --env_name LunarLander-v2 --hidden_units 64,64 --init_epsilon 1.0 --min_epsilon 0.01 --eps_decay 0.995 --clone_steps 10000 --learning_rate 1e-3 --batch_size 64 --checkpoint_freq 100 --lr_decay 1.00
