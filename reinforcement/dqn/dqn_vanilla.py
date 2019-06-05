@@ -13,7 +13,7 @@ tf.logging.set_verbosity(tf.logging.ERROR)
 FLAGS = tf.app.flags.FLAGS
 
 tf.app.flags.DEFINE_string('mode', 'train', """'Train' or 'test'.""")
-tf.app.flags.DEFINE_string('device', '/cpu:0', """'/cpu:0' or '/device:GPU:0'.""")
+tf.app.flags.DEFINE_string('device', '/cpu:0', """'/cpu:0' or '/gpu:0'.""")
 tf.app.flags.DEFINE_string('env_name', 'CartPole-v0', """Gym environment.""")
 tf.app.flags.DEFINE_string('hidden_units', '64', """Size of hidden layers.""")
 tf.app.flags.DEFINE_float('learning_rate', 1e-3, """Initial learning rate.""")
