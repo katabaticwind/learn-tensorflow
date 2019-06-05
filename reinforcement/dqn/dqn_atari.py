@@ -4,14 +4,10 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # suppress all messages
 import numpy as np
 import gym
 import time
-from collections import deque  # for replay memory
 
-# TODO: only perform updates every K actions?
-# TODO: clipping error terms in update to (-1, 1)
-# TODO: regularization? (l1, l2, dropout or batch normalization)
-# TODO: change dtype of replay memory states to float32
-
-from atari import crop_frame, RGB_to_luminance, convert_frames, append_to_queue
+from atari import crop_frame, RGB_to_luminance, frames_to_state
+from queues import Queue
+from utils import create_directories
 
 tf.logging.set_verbosity(tf.logging.ERROR)
 
@@ -19,22 +15,34 @@ FLAGS = tf.app.flags.FLAGS
 
 tf.app.flags.DEFINE_string('mode', 'train', """'Train' or 'test'.""")
 tf.app.flags.DEFINE_string('env_name', 'Pong-v0', """Atari environment.""")
-tf.app.flags.DEFINE_string('network', 'mlp', """'mlp' or 'cnn'.""")
-tf.app.flags.DEFINE_string('filters', '8,16', """Channels of feature maps.""")
+tf.app.flags.DEFINE_string('device', '/gpu:0', """'/cpu:0' or '/gpu:0'.""")
+
+tf.app.flags.DEFINE_string('filters', '32,64,64', """Channels of feature maps.""")
+tf.app.flags.DEFINE_string('size', '8,4,3', """Sizes of filters.""")
+tf.app.flags.DEFINE_string('strides', '4,2,1', """Strides of filters.""")
 tf.app.flags.DEFINE_string('hidden_units', '512', """Size of hidden layers.""")
-tf.app.flags.DEFINE_float('lr', '1e-4', """Initial learning rate.""")
+
+tf.app.flags.DEFINE_float('lr', 2.5e-4, """Initial learning rate.""")
+tf.app.flags.DEFINE_float('lr_decay', 1.00, """Learning rate decay (per episode).""")
+tf.app.flags.DEFINE_integer('batch_size', 32, """Examples per training update.""")
+tf.app.flags.DEFINE_float('discount_factor', 0.99, """Reward discount factor (i.e., "gamma").""")
+tf.app.flags.DEFINE_boolean('clip_rewards', True, """Clip rewards to [-1, 1].""")
+tf.app.flags.DEFINE_boolean('clip_errors', True, """Clip errors to [-1, 1].""")
+tf.app.flags.DEFINE_integer('clone_steps', 10000, """Steps between cloning ops.""")
+
 tf.app.flags.DEFINE_float('init_epsilon', 1.0, """Initial exploration rate.""")
 tf.app.flags.DEFINE_float('min_epsilon', 0.1, """Minimum exploration rate.""")
-tf.app.flags.DEFINE_integer('batch_size', 32, """Examples per training update.""")
-tf.app.flags.DEFINE_integer('clone_steps', 10000, """Steps between cloning ops.""")
-tf.app.flags.DEFINE_integer('min_memory_size', 5000, """Minimum number of replay memories.""")
-tf.app.flags.DEFINE_integer('max_memory_size', 50000, """Maximum number of replay memories.""")
-tf.app.flags.DEFINE_integer('frames_per_state', 2, """Frames used to construct a state.""")
-tf.app.flags.DEFINE_integer('episodes', 1000, """Episodes per train/test routine.""")
 tf.app.flags.DEFINE_integer('anneal_steps', 1000000, """Steps per train/test routine.""")
-tf.app.flags.DEFINE_integer('report_freq', 10, """Episodes between status reports.""")
-tf.app.flags.DEFINE_string('save_path', './checkpoints/', """Checkpoint directory.""")
-tf.app.flags.DEFINE_string('load_path', './checkpoints/', """Checkpoint directory.""")
+
+tf.app.flags.DEFINE_integer('min_memory_size', 50000, """Minimum number of replay memories.""")
+tf.app.flags.DEFINE_integer('max_memory_size', 1000000, """Maximum number of replay memories.""")
+
+tf.app.flags.DEFINE_integer('update_freq', 4, """Frames between updates.""")
+tf.app.flags.DEFINE_integer('action_repeat', 4, """Frames each action is repeated for.""")  # frames per "state"
+
+tf.app.flags.DEFINE_integer('episodes', 10000, """Episodes per train/test routine.""")
+tf.app.flags.DEFINE_integer('ckpt_freq', 10, """Episodes between status reports.""")
+tf.app.flags.DEFINE_string('base_dir', '.', """Base directory for checkpoints and logs.""")
 tf.app.flags.DEFINE_boolean('render', False, """Render once per batch in training mode.""")
 
 def available_actions(env):
@@ -48,140 +56,153 @@ def state_dimensions(env):
     """Find the number of dimensions in the state."""
     return env.observation_space.shape[0]
 
-def mlp(x, sizes, activation=tf.tanh, output_activation=None, scope=''):
-    """Build a feedforward neural network.
-
-        - `scope`: used to distinguish target network from value network.
-
-    """
-    x = tf.reshape(x, (-1, 84 * 84 * x.shape[-1].value))
-    with tf.variable_scope(scope):
-        for size in sizes[:-1]:
-            x = tf.layers.dense(x, units=size, activation=activation)  # TODO: creates multiple warnings (DEPRECATED)
-        return tf.layers.dense(x, units=sizes[-1], activation=output_activation)
-
-def cnn(x, filters, units, activation=tf.nn.relu, output_activation=None, scope=''):
+def cnn(x, n_actions, scope=''):
 
     with tf.variable_scope(scope):
 
         # conv1
         x = tf.layers.conv2d(
             inputs=x,
-            filters=filters[0],
-            kernel_size=[5, 5],
-            padding='same',
+            filters=32,
+            kernel_size=8,
+            strides=4,
+            padding='valid',
             activation=tf.nn.relu)
-        x = tf.layers.max_pooling2d(
-            inputs=x,
-            pool_size=[2, 2],
-            strides=2
-        )  # batch_size x 42 x 42 x filters[0]
 
         # conv2
         x = tf.layers.conv2d(
             inputs=x,
-            filters=filters[1],
-            kernel_size=[5, 5],
-            padding='same',
+            filters=64,
+            kernel_size=4,
+            strides=2,
+            padding='valid',
             activation=tf.nn.relu)
-        x = tf.layers.max_pooling2d(
+
+        # conv3
+        x = tf.layers.conv2d(
             inputs=x,
-            pool_size=[2, 2],
-            strides=2
-        )  # batch_size x 21 x 21 x filters[1]
+            filters=64,
+            kernel_size=3,
+            strides=1,
+            padding='valid',
+            activation=tf.nn.relu)
 
         # dense
-        x = tf.reshape(x, (-1, 21 * 21 * filters[1]))  # flatten x
-        x = tf.layers.dense(x, units[0], tf.nn.relu)
+        x = tf.layers.dense(tf.reshape(x, (-1, 64 * 7 * 7)), 512, tf.nn.relu)
 
         # logits
-        return tf.layers.dense(x, units[-1], activation=output_activation)
+        return tf.layers.dense(x, n_actions)
 
-def create_replay_memory(env, frames_per_state, min_memory_size, max_memory_size):
+def create_replay_memory(env, action_repeat, min_memory_size, max_memory_size):
     """Initialize replay memory to `size`. Collect experience under random policy."""
 
     print('Creating replay memory...')
     t0 = time.time()
-    memory = deque()
-    while len(memory) < min_memory_size:
+    memory_queue = Queue(max_memory_size)
+    while len(memory_queue) < min_memory_size:
         frame = env.reset()
-        frame_queue = deque()
-        append_to_queue(frame_queue, frame, max_len=frames_per_state)
-        state = convert_frames(frame_queue, min_len=frames_per_state)
+        frame_queue = Queue(action_repeat, [frame])
+        state = frames_to_state(frame_queue, min_len=action_repeat)
         while True:
             action = np.random.randint(env.action_space.n)
             next_frame, reward, done, info = env.step(action)
-            append_to_queue(frame_queue, next_frame, max_len=frames_per_state)
-            next_state = convert_frames(frame_queue, min_len=frames_per_state)
-            update_memory(memory, [state, action, next_state, reward, done], max_memory_size)
+            frame_queue.push(next_frame)
+            next_state = frames_to_state(frame_queue, min_len=action_repeat)
+            memory_queue.push([state, action, reward, next_state, done])
             state = next_state
-            if done or len(memory) == min_memory_size:
+            if done or len(memory_queue) == min_memory_size:
                 break
     elapsed_time = time.time() - t0
     print('done (elapsed time: {:.2f})'.format(elapsed_time))
-    return memory
-
-def update_memory(memory, transition, size):
-    """Add a transition to `memory` with maximum size `size`."""
-    if len(memory) == size:
-        memory.popleft()  # trash oldest memory
-        memory.append(transition)
-    else:
-        memory.append(transition)
+    return memory_queue
 
 def sample_memory(memory, size):
     """Sample `size` transitions from `memory` uniformly"""
-    idx = np.random.choice(range(len(memory)), size)
-    batch = [memory[i] for i in idx]
+    idx = np.random.choice(range(len(memory.queue)), size)
+    batch = [memory.queue[i] for i in idx]
     states = np.array([b[0] for b in batch])
     actions = np.array([b[1] for b in batch])
-    next_states = np.array([b[2] for b in batch])
-    rewards = np.array([b[3] for b in batch])
+    rewards = np.clip(np.array([b[2] for b in batch]), -1, 1)
+    next_states = np.array([b[3] for b in batch])
     dones = np.array([b[4] for b in batch])
-    return states, actions, next_states, rewards, dones
+    return {'states': states,
+            'actions': actions,
+            'rewards': rewards,
+            'next_states': next_states,
+            'dones': dones}
 
-def train(env_name='Pong-v0', network='mlp', filters=[8, 16], hidden_units=[512], lr=1e-2, init_epsilon=1.0, min_epsilon=0.1, batch_size=32, episodes=1000, frames_per_state=2, clone_steps=1000, anneal_steps=100000, min_memory_size=10000, max_memory_size=10000, report_freq=10, save_path=None, render=False):
+def train(env_name='Pong-v0',
+          device='/gpu:0',
+          lr=2.5e-4,
+          lr_decay=1.00,
+          batch_size=32,
+          discount_factor=0.99,
+          clip_rewards=True,
+          clip_errors=True,
+          clone_steps=10000,
+          init_epsilon=1.00,
+          min_epsilon=0.1,
+          anneal_steps=1000000,
+          min_memory_size=50000,
+          max_memory_size=1000000,
+          update_freq=4,
+          action_repeat=4,
+          episodes=10000,
+          ckpt_freq=100,
+          base_dir='.',
+          render=False):
+
+    # create log and checkpoint directories
+    if base_dir is not None:
+        ckpt_dir, log_dir = create_directories(env_name, "dqn_atari", base_dir=base_dir)
+    else:
+        ckpt_dir = log_dir = None
 
     # create an environment
     env = gym.make(env_name)
     n_actions = available_actions(env)
 
-    # create placeholders
-    states_pl = tf.placeholder(tf.float32, (None, 84, 84, frames_per_state))
-    actions_pl = tf.placeholder(tf.int32, (None, ))
-    targets_pl = tf.placeholder(tf.float32, (None, ))
+    # construct graph
+    with tf.device(device):
 
-    # initialize networks
-    if network == 'mlp':
-        action_values = mlp(states_pl, hidden_units + [n_actions], scope='value')
-        target_values = mlp(states_pl, hidden_units + [n_actions], scope='target')
-    elif network == 'cnn':
-        action_values = cnn(states_pl, filters, hidden_units + [n_actions], scope='value')
-        target_values = cnn(states_pl, filters, hidden_units + [n_actions], scope='target')
-    greedy_action = tf.math.argmax(action_values, axis=1)
-    target_actions = tf.math.argmax(target_values, axis=1)
-    value_mask = tf.one_hot(actions_pl, n_actions)
-    target_mask = tf.one_hot(target_actions, n_actions)
-    values = tf.reduce_sum(value_mask * action_values, axis=1)
-    targets = tf.reduce_sum(target_mask * target_values, axis=1)  # minus reward
+        print('constructing graph on device: {}'.format(device))
 
-    # define cloning operation
-    source = tf.get_default_graph().get_collection('trainable_variables', scope='value')
-    target = tf.get_default_graph().get_collection('trainable_variables', scope='target')
-    clone_ops = [tf.assign(t, s, name='clone') for t,s in zip(target, source)]
+        # create placeholders
+        states_pl = tf.placeholder(tf.float32, (None, 84, 84, action_repeat))
+        actions_pl = tf.placeholder(tf.int32, (None, ))
+        targets_pl = tf.placeholder(tf.float32, (None, ))
+
+        # initialize networks
+        estimates = cnn(states_pl, n_actions, scope='estimate')
+        targets = cnn(states_pl, n_actions, scope='target')
+        greedy_action = tf.argmax(estimates, axis=1)
+        target_actions = tf.argmax(targets, axis=1)
+        action_mask = tf.one_hot(actions_pl, n_actions)
+        target_mask = tf.one_hot(target_actions, n_actions)
+        action_values = tf.reduce_sum(action_mask * estimates, axis=1)
+        target_values = tf.reduce_sum(target_mask * targets, axis=1)  # minus reward
+
+        # define cloning operation
+        target = tf.get_default_graph().get_collection('trainable_variables', scope='target')
+        source = tf.get_default_graph().get_collection('trainable_variables', scope='estimate')
+        clone_ops = [tf.assign(t, s, name='clone') for t,s in zip(target, source)]
+
+        # define training operation
+        loss = tf.losses.mean_squared_error(action_values, target_values)
+        clipped_loss = tf.clip_by_value(loss, -1, 1)
+        train_op = tf.train.RMSPropOptimizer(learning_rate=lr).minimize(clipped_loss)
+
+    # create a saver
+    saver = tf.train.Saver()
 
     # initialize replay memory
-    memory = create_replay_memory(env, frames_per_state, min_memory_size, max_memory_size)
-
-    # define training operation
-    loss = tf.losses.mean_squared_error(values, targets_pl)
-    train_op = tf.train.RMSPropOptimizer(learning_rate=lr).minimize(loss)
+    memory_queue = create_replay_memory(env, action_repeat, min_memory_size, max_memory_size)
 
     # create a saver
     saver = tf.train.Saver()
 
     def clone_network(sess):
-        """Clone `action_values` network to `target_values`."""
+        """Clone `estimate_values` network to `target_values`."""
         sess.run(clone_ops)
 
     def anneal_epsilon(step, init_epsilon=1.0, min_epsilon=0.1, anneal_steps=1000000):
@@ -194,22 +215,25 @@ def train(env_name='Pong-v0', network='mlp', filters=[8, 16], hidden_units=[512]
         epsilon = init_epsilon - step * (init_epsilon - min_epsilon) / anneal_steps
         return np.maximum(min_epsilon, epsilon)
 
+    def log_scalar(writer, tag, value, step):
+        value = [tf.Summary.Value(tag=tag, simple_value=value)]
+        summary = tf.Summary(value=value)
+        writer.add_summary(summary, step)
+
     def run_episode(env, sess, global_step, global_epsilon, render=False, delay=0.01):
         frame = env.reset()
-        frame_queue = deque()
-        append_to_queue(frame_queue, frame, max_len=frames_per_state)
-        state = convert_frames(frame_queue, min_len=frames_per_state)
+        frame_queue = Queue(action_repeat, [frame])
+        state = frames_to_state(frame_queue, min_len=action_repeat)
         episode_reward = 0
         episode_steps = 0
         if render == True:
             env.render()
             time.sleep(delay)
         while True:
-            # select an action
             if np.random.rand() < global_epsilon:
                 action = np.random.randint(env.action_space.n)
             else:
-                action = sess.run(greedy_action, feed_dict={states_pl: state.reshape(1, 84, 84, frames_per_state)})[0]
+                action = sess.run(greedy_action, feed_dict={states_pl: state.reshape(1, 84, 84, action_repeat)})[0]
 
             # take a step
             next_frame, reward, done, info = env.step(action)
@@ -218,40 +242,49 @@ def train(env_name='Pong-v0', network='mlp', filters=[8, 16], hidden_units=[512]
                 time.sleep(delay)
 
             # save transition to memory
-            append_to_queue(frame_queue, next_frame, max_len=frames_per_state)
-            next_state = convert_frames(frame_queue, min_len=frames_per_state)
-            update_memory(memory, [state, action, next_state, reward, done], max_memory_size)
-            state = next_state  # .copy() is only necessary if you modify the contents of next_state
-
-            # perform update
-            batch_states, batch_actions, batch_next_states, batch_rewards, batch_dones = sample_memory(memory, batch_size)
-            batch_targets = sess.run(targets,
-                feed_dict={
-                    states_pl: batch_next_states,
-                })  # calculates targets
-            batch_targets = batch_rewards + ~batch_dones * batch_targets
-            sess.run([loss, train_op],
-                feed_dict={
-                    states_pl: batch_states,
-                    actions_pl: batch_actions,
-                    targets_pl: batch_targets
-                })  # calculates values and updates parameters
-
-            # update step count and clone
-            global_step += 1
-            if global_step % clone_steps == 0:
-                sess.run(clone_ops)
-                # print("Cloned action-value network!")
-
-            # update epsilon
-            global_epsilon = anneal_epsilon(global_step, init_epsilon,
-                                            min_epsilon, anneal_steps)
+            frame_queue.push(next_frame)
+            next_state = frames_to_state(frame_queue, min_len=action_repeat)
+            memory_queue.push([state, action, reward, next_state, done])
+            state = next_state
 
             # update episode totals
             episode_reward += reward
             episode_steps += 1
 
-            # check if you're done
+            # update network parameters
+            if episode_steps % update_freq == 0:
+
+                # calculate target
+                batch = sample_memory(memory_queue, batch_size)
+                batch['targets'] = sess.run(target_values,
+                    feed_dict={
+                        states_pl: batch['next_states'],
+                    })
+                batch['targets'] = batch['rewards'] + ~batch['dones'] * discount_factor * batch['targets']
+
+                # gradient descent
+                sess.run(train_op,
+                    feed_dict={
+                        states_pl: batch['states'],
+                        actions_pl: batch['actions'],
+                        targets_pl: batch['targets'],
+                    })
+
+            # update step count
+            global_step += 1
+
+            # update target network
+            if global_step % clone_steps == 0:
+                sess.run(clone_ops)
+                # print("cloned action-value network")
+
+            # update epsilon
+            global_epsilon = anneal_epsilon(global_step,
+                                            init_epsilon,
+                                            min_epsilon,
+                                            anneal_steps)
+
+            # check if done
             if done:
                 break
 
@@ -260,37 +293,51 @@ def train(env_name='Pong-v0', network='mlp', filters=[8, 16], hidden_units=[512]
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
         sess.run(clone_ops)  # set networks equal to begin
+        writer = tf.summary.FileWriter(log_dir, sess.graph)  # create writer for logging
         global_step = 0
         global_epsilon = init_epsilon
         t0 = time.time()
-        total_reward = 0
+        reward_history = []
         for episode in range(episodes):
-            if (episode + 1) % report_freq == 0:
-                episode_reward, episode_steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=render)  # optionally render first episode per report cycle...
+            if (episode + 1) % ckpt_freq == 0:
+                reward, steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=render)  # optionally render one episode per checkpoint
             else:
-                episode_reward, episode_steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=False)
-            total_reward += episode_reward
-            if (episode + 1) % report_freq == 0:
-                elapsed_time = time.time() - t0
-                mean_reward = total_reward / report_freq
-                print('episode: {:d},  reward: {:.2f},  (global) steps:  {:d},  (global) epsilon: {:.2f},  elapsed: {:.2f}'.format(episode + 1, mean_reward, global_step, global_epsilon, elapsed_time))
-                if save_path is not None:
-                    saver.save(sess, save_path=save_path + 'dqn-atari-' + env_name, global_step=global_step)
-                total_reward = 0
-        return saver.last_checkpoints
+                reward, steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=False)  # TODO: switch render arg back to False...
+            lr = lr * lr_decay  # decay learning rate per episode
+            reward_history += [reward]
+            elapsed_time = time.time() - t0
+            avg_reward = np.mean(reward_history[-100:])  # moving avg (last 100 episodes)
+            print('episode: {:d},  reward: {:.2f},  avg. reward: {:.2f},  steps:  {:d},  epsilon: {:.2f}, lr: {:.2e},  elapsed: {:.2f}'.format(episode + 1, reward, avg_reward, global_step, global_epsilon, lr, elapsed_time))
 
-def find_latest_checkpoint(load_path, prefix):
+            # logging
+            log_scalar(writer, 'reward', reward, global_step)
+            log_scalar(writer, 'learning_rate', lr, global_step)
+            log_scalar(writer, 'epsilon', global_epsilon, global_step)
+
+            # checkpoint
+            if (episode + 1) % ckpt_freq == 0:
+                if ckpt_dir is not None:
+                    saver.save(sess, save_path=ckpt_dir + "/ckpt", global_step=global_step)
+
+        # final checkpoint
+        if ckpt_dir is not None:
+            saver.save(sess, save_path=ckpt_dir + "/ckpt", global_step=global_step)
+
+def find_latest_checkpoint(ckpt_dir, prefix="ckpt-"):
     """Find the latest checkpoint in dir at `load_path` with prefix `prefix`
-
-        E.g. ./checkpoints/dqn-atari-CartPole-v0-GLOBAL_STEP would use find_latest_checkpoint('./checkpoints/', 'dqn-atari-CartPole-v0')
+        E.g. ./checkpoints/CartPole-v0/dqn-vanilla/GLOBAL_STEP
     """
-    files = os.listdir(load_path)
+    files = os.listdir(ckpt_dir)
     matches = [f for f in files if f.find(prefix) == 0]  # files starting with prefix
     max_steps = np.max(np.unique([int(m.strip(prefix).split('.')[0]) for m in matches]))
-    latest_checkpoint = load_path + prefix + '-' + str(max_steps)
+    latest_checkpoint = ckpt_dir + prefix + str(max_steps)
     return latest_checkpoint
 
-def test(env_name='Pong-v0', hidden_units=[32], epsilon=0.01, episodes=100, load_path=None, render=False):
+def test(env_name='Pong-v0',
+         epsilon=0.01,
+         episodes=100,
+         restore_dir=None,
+         render=False):
 
     # create an environment
     env = gym.make(env_name)
@@ -302,10 +349,10 @@ def test(env_name='Pong-v0', hidden_units=[32], epsilon=0.01, episodes=100, load
     actions_pl = tf.placeholder(tf.int32, (None, ))
 
     # initialize networks
-    action_values = mlp(states_pl, hidden_units + [n_actions], scope='value')
-    greedy_action = tf.math.argmax(action_values, axis=1)
+    estimate_values = mlp(states_pl, hidden_units + [n_actions], scope='value')
+    greedy_action = tf.math.argmax(estimate_values, axis=1)
     value_mask = tf.one_hot(actions_pl, n_actions)
-    values = tf.reduce_sum(value_mask * action_values, axis=1)
+    values = tf.reduce_sum(value_mask * estimate_values, axis=1)
 
     # create a saver
     saver = tf.train.Saver()
@@ -353,21 +400,24 @@ def test(env_name='Pong-v0', hidden_units=[32], epsilon=0.01, episodes=100, load
 if __name__ == '__main__':
     if FLAGS.mode == 'train':
         train(env_name=FLAGS.env_name,
-              network=FLAGS.network,
-              filters=[int(i) for i in FLAGS.filters.split(',')],
-              hidden_units=[int(i) for i in FLAGS.hidden_units.split(',')],
+              device=FLAGS.device,
               lr=FLAGS.lr,
+              lr_decay=FLAGS.lr_decay,
+              batch_size=FLAGS.batch_size,
+              discount_factor=FLAGS.discount_factor,
+              clip_rewards=FLAGS.clip_rewards,
+              clip_errors=FLAGS.clip_errors,
+              clone_steps=FLAGS.clone_steps,
               init_epsilon=FLAGS.init_epsilon,
               min_epsilon=FLAGS.min_epsilon,
-              batch_size=FLAGS.batch_size,
-              episodes=FLAGS.episodes,
-              frames_per_state=FLAGS.frames_per_state,
-              clone_steps=FLAGS.clone_steps,
               anneal_steps=FLAGS.anneal_steps,
               min_memory_size=FLAGS.min_memory_size,
               max_memory_size=FLAGS.max_memory_size,
-              report_freq=FLAGS.report_freq,
-              save_path=FLAGS.save_path,
+              update_freq=FLAGS.update_freq,
+              action_repeat=FLAGS.action_repeat,
+              episodes=FLAGS.episodes,
+              ckpt_freq=FLAGS.ckpt_freq,
+              base_dir=FLAGS.base_dir,
               render=FLAGS.render)
     else:
         score = test(env_name=FLAGS.env_name,

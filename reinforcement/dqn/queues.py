@@ -22,6 +22,11 @@ class Queue():
         else:
             self.queue.append(value)
 
+    def fill(self, min_len):
+        """Fill queue up to `min_len` by copying the first element."""
+        while len(self) < min_len:
+            self.queue.appendleft(self.queue[0])
+
 class PriorityQueue():
     """Implementation of priority queue.
 
