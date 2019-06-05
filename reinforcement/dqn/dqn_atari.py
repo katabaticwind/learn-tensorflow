@@ -179,12 +179,10 @@ def train(env_name='CartPole-v0',
         target_mask = tf.one_hot(target_actions, n_actions)
         values = tf.reduce_sum(value_mask * action_values, axis=1)
         targets = tf.reduce_sum(target_mask * target_values, axis=1)
-        tf.summary.histogram('action_values', values)
 
         # define training operation
         loss = tf.losses.mean_squared_error(values, targets_pl)
         train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
-        tf.summary.scalar('loss', loss)
 
         # define cloning operation
         source = tf.get_default_graph().get_collection('trainable_variables', scope='value')
@@ -194,7 +192,9 @@ def train(env_name='CartPole-v0',
     # initialize replay memory
     memory_queue = create_replay_memory(env, agent_history, min_memory_size, max_memory_size)
 
-    # merge summary ops
+    # create summary ops
+    tf.summary.histogram('action_values', values)
+    tf.summary.scalar('loss', loss)
     summary_op = tf.summary.merge_all()
 
     # create a saver
