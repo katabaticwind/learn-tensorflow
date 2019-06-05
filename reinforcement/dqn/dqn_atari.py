@@ -17,7 +17,7 @@ FLAGS = tf.app.flags.FLAGS
 tf.app.flags.DEFINE_string('mode', 'train', """'Train' or 'test'.""")
 tf.app.flags.DEFINE_string('env_name', 'Pong-v0', """Gym environment.""")
 tf.app.flags.DEFINE_string('device', '/cpu:0', """'/cpu:0' or '/gpu:0'.""")
-tf.app.flags.DEFINE_float('learning_rate', 1e-3, """Initial learning rate.""")
+tf.app.flags.DEFINE_float('learning_rate', 0.00025, """Initial learning rate.""")
 tf.app.flags.DEFINE_integer('batch_size', 32, """Examples per training update.""")
 tf.app.flags.DEFINE_float('discount_factor', 0.99, """Discount factor in update.""")
 tf.app.flags.DEFINE_float('init_epsilon', 1.0, """Initial exploration rate.""")
@@ -161,7 +161,9 @@ def train(env_name='CartPole-v0',
 
         # define training operation
         loss = tf.clip_by_value(tf.losses.mean_squared_error(values, targets_pl), -1, 1)  # error clipping
-        train_op = tf.train.RMSPropOptimizer(learning_rate=learning_rate).minimize(loss)
+        train_op = tf.train.RMSPropOptimizer(learning_rate=learning_rate,
+                                             momentum=0.95,
+                                             epsilon=0.01).minimize(loss)
 
         # define cloning operation
         source = tf.get_default_graph().get_collection('trainable_variables', scope='value')
