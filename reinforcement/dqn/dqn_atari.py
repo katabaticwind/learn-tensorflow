@@ -57,7 +57,7 @@ def cnn(x, n_actions, scope=''):
             strides=4,
             padding='valid',
             activation=tf.nn.relu)
-        tf.summary.histogram('conv1', x)
+        # tf.summary.histogram('conv1', x)
 
         # conv2
         x = tf.layers.conv2d(
@@ -67,7 +67,7 @@ def cnn(x, n_actions, scope=''):
             strides=2,
             padding='valid',
             activation=tf.nn.relu)
-        tf.summary.histogram('conv2', x)
+        # tf.summary.histogram('conv2', x)
 
         # conv3
         x = tf.layers.conv2d(
@@ -77,15 +77,15 @@ def cnn(x, n_actions, scope=''):
             strides=1,
             padding='valid',
             activation=tf.nn.relu)
-        tf.summary.histogram('conv3', x)
+        # tf.summary.histogram('conv3', x)
 
         # dense
         x = tf.layers.dense(tf.reshape(x, (-1, 64 * 7 * 7)), 512, tf.nn.relu)
-        tf.summary.histogram('dense', x)
+        # tf.summary.histogram('dense', x)
 
         # logits
         logits = tf.layers.dense(x, n_actions)
-        tf.summary.histogram('logits', logits)
+        # tf.summary.histogram('logits', logits)
         return logits
 
 def create_replay_memory(env, agent_history, min_memory_size, max_memory_size):
