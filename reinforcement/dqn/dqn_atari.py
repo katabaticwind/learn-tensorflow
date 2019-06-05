@@ -41,10 +41,6 @@ def available_actions(env):
     except AttributeError:
         raise AttributeError("env.action_space is not Discrete")
 
-def state_dimensions(env):
-    """Find the number of dimensions in the state."""
-    return env.observation_space.shape[0]
-
 def cnn(x, n_actions, scope=''):
 
     with tf.variable_scope(scope):
@@ -94,7 +90,7 @@ def sample_memory(memory, size=32):
     batch = [memory.queue[i] for i in idx]
     states = np.array([b[0] for b in batch])
     actions = np.array([b[1] for b in batch])
-    rewards = np.clip(np.array([b[2] for b in batch]), -1, 1)
+    rewards = np.clip(np.array([b[2] for b in batch]), -1, 1)  # reward clipping
     next_states = np.array([b[3] for b in batch])
     dones = np.array([b[4] for b in batch])
     return states, actions, rewards, next_states, dones
@@ -155,17 +151,17 @@ def train(env_name='CartPole-v0',
 
         # action selection
         greedy_action = tf.arg_max(action_values, dimension=1)
+        target_actions = tf.arg_max(target_values, dimension=1)
 
         # action-value calculation
-        target_actions = tf.arg_max(target_values, dimension=1)
         value_mask = tf.one_hot(actions_pl, n_actions)
         target_mask = tf.one_hot(target_actions, n_actions)
         values = tf.reduce_sum(value_mask * action_values, axis=1)
         targets = tf.reduce_sum(target_mask * target_values, axis=1)
 
         # define training operation
-        loss = tf.losses.mean_squared_error(values, targets_pl)
-        train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
+        loss = tf.clip_by_value(tf.losses.mean_squared_error(values, targets_pl), -1, 1)  # error clipping
+        train_op = tf.train.RMSPropOptimizer(learning_rate=learning_rate).minimize(loss)
 
         # define cloning operation
         source = tf.get_default_graph().get_collection('trainable_variables', scope='value')
@@ -177,7 +173,8 @@ def train(env_name='CartPole-v0',
     preprocess_op = rgb_to_grayscale(frame_pl)  # uint8, 84 x 84
 
     # create summary ops
-    tf.summary.image('state', tf.reshape(states_pl[0, :, :, :], [-1, 84, 84, agent_history]))
+    imgs = tf.transpose(tf.reshape(states_pl[0, :, :, :], [-1, 84, 84, agent_history]), perm=[3, 1, 2, 0])
+    tf.summary.image('state', imgs, max_outputs=4)
     tf.summary.histogram('action_values', values)
     tf.summary.scalar('loss', loss)
     summary_op = tf.summary.merge_all()
