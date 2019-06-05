@@ -7,7 +7,7 @@ import time
 from collections import deque  # for replay memory
 
 from utils import create_directories
-from atari import preprocess, collect_frames
+from atari import rgb_to_grayscale, collect_frames
 from queues import Queue
 
 tf.logging.set_verbosity(tf.logging.ERROR)
@@ -88,29 +88,6 @@ def cnn(x, n_actions, scope=''):
         # tf.summary.histogram('logits', logits)
         return logits
 
-def create_replay_memory(env, agent_history, min_memory_size, max_memory_size):
-    """Initialize replay memory to `size`. Collect experience under random policy."""
-
-    print('Creating replay memory...')
-    t0 = time.time()
-    memory_queue = Queue(size=max_memory_size)
-    while len(memory_queue) < min_memory_size:
-        frame = env.reset()
-        frame_queue = Queue(init_values=[preprocess(frame)], size=agent_history)
-        state = collect_frames(frame_queue, nframes=agent_history)
-        while True:
-            action = np.random.randint(env.action_space.n)
-            next_frame, reward, done, info = env.step(action)
-            frame_queue.push(preprocess(next_frame))
-            next_state = collect_frames(frame_queue, nframes=agent_history)
-            memory_queue.push([state, action, reward, next_state, done])
-            state = next_state.copy()
-            if done or len(memory_queue) == min_memory_size:
-                break
-    elapsed_time = time.time() - t0
-    print('done (elapsed time: {:.2f})'.format(elapsed_time))
-    return memory_queue
-
 def sample_memory(memory, size=32):
     """Sample `size` transitions from `memory` uniformly"""
     idx = np.random.choice(range(len(memory.queue)), size)
@@ -162,13 +139,19 @@ def train(env_name='CartPole-v0',
         print('constructing graph on device: {}'.format(device))
 
         # create placeholders
-        states_pl = tf.placeholder(tf.float32, (None, 84, 84, agent_history))
+        states_pl = tf.placeholder(tf.uint8, (None, 84, 84, agent_history))
         actions_pl = tf.placeholder(tf.int32, (None, ))
         targets_pl = tf.placeholder(tf.float32, (None, ))
 
         # create networks
-        action_values = cnn(states_pl, n_actions, scope='value')
-        target_values = cnn(states_pl, n_actions, scope='target')
+        action_values = cnn(
+            tf.cast(states_pl, tf.float32) / 255.0,
+            n_actions,
+            scope='value')
+        target_values = cnn(
+            tf.cast(states_pl, tf.float32) / 255.0,
+            n_actions,
+            scope='target')
 
         # action selection
         greedy_action = tf.arg_max(action_values, dimension=1)
@@ -189,16 +172,44 @@ def train(env_name='CartPole-v0',
         target = tf.get_default_graph().get_collection('trainable_variables', scope='target')
         clone_ops = [tf.assign(t, s, name='clone') for t,s in zip(target, source)]
 
-    # initialize replay memory
-    memory_queue = create_replay_memory(env, agent_history, min_memory_size, max_memory_size)
+    # create preprocessing ops
+    frame_pl = tf.placeholder(tf.uint8, [210, 160, 3])
+    preprocess_op = rgb_to_grayscale(frame_pl)  # uint8, 84 x 84
 
     # create summary ops
+    tf.summary.image('state', tf.reshape(states_pl[0, :, :, :], [-1, 84, 84, agent_history]))
     tf.summary.histogram('action_values', values)
     tf.summary.scalar('loss', loss)
     summary_op = tf.summary.merge_all()
 
     # create a saver
     saver = tf.train.Saver()
+
+    def preprocess(frame, sess):
+        return sess.run(preprocess_op, {frame_pl: frame})
+
+    def create_replay_memory(env, sess, agent_history, min_memory_size, max_memory_size):
+        """Initialize replay memory to `size`. Collect experience under random policy."""
+
+        print('Creating replay memory...')
+        t0 = time.time()
+        memory_queue = Queue(size=max_memory_size)
+        while len(memory_queue) < min_memory_size:
+            frame = env.reset()
+            frame_queue = Queue(init_values=[preprocess(frame, sess)], size=agent_history)
+            state = collect_frames(frame_queue, nframes=agent_history)
+            while True:
+                action = np.random.randint(env.action_space.n)
+                next_frame, reward, done, info = env.step(action)
+                frame_queue.push(preprocess(next_frame, sess))
+                next_state = collect_frames(frame_queue, nframes=agent_history)
+                memory_queue.push([state, action, reward, next_state, done])
+                state = next_state.copy()
+                if done or len(memory_queue) == min_memory_size:
+                    break
+        elapsed_time = time.time() - t0
+        print('done (elapsed time: {:.2f})'.format(elapsed_time))
+        return memory_queue
 
     def clone_network(sess):
         """Clone `action_values` network to `target_values`."""
@@ -216,7 +227,7 @@ def train(env_name='CartPole-v0',
 
     def run_episode(env, sess, global_step, global_epsilon, render=False, delay=0.0):
         frame = env.reset()
-        frame_queue = Queue(init_values=[preprocess(frame)], size=agent_history)
+        frame_queue = Queue(init_values=[preprocess(frame, sess)], size=agent_history)
         state = collect_frames(frame_queue, nframes=agent_history)
         episode_reward = 0
         episode_steps = 0
@@ -242,7 +253,7 @@ def train(env_name='CartPole-v0',
                 time.sleep(delay)
 
             # calculate next state
-            frame_queue.push(preprocess(next_frame))
+            frame_queue.push(preprocess(next_frame, sess))
             next_state = collect_frames(frame_queue, nframes=agent_history)
 
             # save transition to memory
@@ -298,6 +309,7 @@ def train(env_name='CartPole-v0',
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
         sess.run(clone_ops)  # set networks equal to begin
+        memory_queue = create_replay_memory(env, sess, agent_history, min_memory_size, max_memory_size)
         writer = tf.summary.FileWriter(log_dir, sess.graph)
         global_step = 0
         global_epsilon = init_epsilon
