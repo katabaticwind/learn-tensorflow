@@ -4,6 +4,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # suppress all messages
 import numpy as np
 import gym
 import time
+import json
 from collections import deque  # for replay memory
 
 from utils import create_directories
@@ -21,16 +22,17 @@ tf.app.flags.DEFINE_float('learning_rate', 0.00025, """Initial learning rate."""
 tf.app.flags.DEFINE_integer('batch_size', 32, """Examples per training update.""")
 tf.app.flags.DEFINE_float('discount_factor', 0.99, """Discount factor in update.""")
 tf.app.flags.DEFINE_float('init_epsilon', 1.0, """Initial exploration rate.""")
-tf.app.flags.DEFINE_float('min_epsilon', 0.1, """Minimum exploration rate.""")
+tf.app.flags.DEFINE_float('min_epsilon', 0.05, """Minimum exploration rate.""")
 tf.app.flags.DEFINE_integer('anneal_steps', 1000000, """Steps to anneal exploration over.""")
-tf.app.flags.DEFINE_integer('episodes', 20000, """Episodes per train/test run.""")
+tf.app.flags.DEFINE_integer('episodes', 10000, """Episodes per train/test run.""")
 tf.app.flags.DEFINE_integer('update_freq', 4, """Number of actions between updates.""")
 tf.app.flags.DEFINE_integer('agent_history', 4, """Number of frames per state.""")
 tf.app.flags.DEFINE_integer('clone_steps', 10000, """Steps between cloning ops.""")
-tf.app.flags.DEFINE_integer('max_steps', 5000, """Maximum steps per episode.""")
-tf.app.flags.DEFINE_integer('min_memory_size', 50000, """Minimum number of replay memories.""")
-tf.app.flags.DEFINE_integer('max_memory_size', 1000000, """Maximum number of replay memories.""")
-tf.app.flags.DEFINE_integer('ckpt_freq', 25, """Steps per checkpoint.""")
+tf.app.flags.DEFINE_integer('max_steps', 100000, """Maximum steps per episode.""")
+tf.app.flags.DEFINE_integer('min_memory_size', 10000, """Minimum number of replay memories.""")
+tf.app.flags.DEFINE_integer('max_memory_size', 100000, """Maximum number of replay memories.""")
+tf.app.flags.DEFINE_integer('ckpt_freq', 25, """Episodes per checkpoint.""")
+tf.app.flags.DEFINE_integer('log_freq', 25, """Steps per log.""")
 tf.app.flags.DEFINE_string('base_dir', '.', """Base directory for checkpoints and logs.""")
 tf.app.flags.DEFINE_boolean('render', False, """Render episodes (once per `ckpt_freq` in training mode).""")
 
@@ -106,22 +108,42 @@ def train(env_name='CartPole-v0',
           batch_size=32,
           discount_factor=0.99,
           init_epsilon=1.0,
-          min_epsilon=0.01,
+          min_epsilon=0.05,
           anneal_steps=1000000,
-          episodes=20000,
+          episodes=10000,
           update_freq=4,
           agent_history=4,
           clone_steps=10000,
-          max_steps=5000,
-          min_memory_size=50000,
-          max_memory_size=1000000,
+          max_steps=100000,
+          min_memory_size=10000,
+          max_memory_size=100000,
           ckpt_freq=25,
+          log_freq=25,
           base_dir=None,
           render=True):
 
     # create log and checkpoint directories
     if base_dir is not None:
-        ckpt_dir, log_dir = create_directories(env_name, "dqn_atari", base_dir=base_dir)
+        ckpt_dir, log_dir, meta_dir = create_directories(env_name, "dqn_atari", base_dir=base_dir)
+        meta = {
+            'env_name': env_name,
+            'device': device,
+            'learning_rate': learning_rate,
+            'batch_size': batch_size,
+            'discount_factor': discount_factor,
+            'init_epsilon': init_epsilon,
+            'min_epsilon': min_epsilon,
+            'anneal_steps': anneal_steps,
+            'episodes': episodes,
+            'update_freq': update_freq,
+            'agent_history': agent_history,
+            'clone_steps': clone_steps,
+            'max_steps': max_steps,
+            'min_memory_size': min_memory_size,
+            'max_memory_size': max_memory_size,
+        }
+        with open(meta_dir + '/meta.json', 'w') as file:
+            json.dump(meta, file, indent=2)
     else:
         ckpt_dir = log_dir = None
 
@@ -214,7 +236,7 @@ def train(env_name='CartPole-v0',
         """Clone `action_values` network to `target_values`."""
         sess.run(clone_ops)
 
-    def anneal_epsilon(step, init_epsilon=1.0, min_epsilon=0.1, anneal_steps=1000000):
+    def anneal_epsilon(step, init_epsilon=1.0, min_epsilon=0.05, anneal_steps=1000000):
         """
             Linear annealing of `init_epsilon` to `min_epsilon` over `anneal_steps`.
 
@@ -278,13 +300,23 @@ def train(env_name='CartPole-v0',
                 batch_targets = batch_rewards + ~batch_dones * discount_factor * batch_targets
 
                 # parameter update
-                summary, _ = sess.run([summary_op, train_op],
-                    feed_dict={
-                        states_pl: batch_states,
-                        actions_pl: batch_actions,
-                        targets_pl: batch_targets,
-                    })
-                writer.add_summary(summary, global_step)
+                if episode_steps % log_freq == 0:
+                    # ... w/ logging...
+                    summary, _ = sess.run([summary_op, train_op],
+                        feed_dict={
+                            states_pl: batch_states,
+                            actions_pl: batch_actions,
+                            targets_pl: batch_targets,
+                        })
+                    writer.add_summary(summary, global_step)
+                else:
+                    # ... w/o logging...
+                    sess.run(train_op,
+                        feed_dict={
+                            states_pl: batch_states,
+                            actions_pl: batch_actions,
+                            targets_pl: batch_targets,
+                        })
 
             # update target network
             if global_step % clone_steps == 0:
@@ -328,6 +360,8 @@ def train(env_name='CartPole-v0',
 
             # logging
             log_scalar(writer, 'reward', reward, global_step)
+            log_scalar(writer, 'steps', steps, global_step)
+            log_scalar(writer, 'avg_reward', avg_reward, global_step)
             log_scalar(writer, 'learning_rate', learning_rate, global_step)
             log_scalar(writer, 'epsilon', global_epsilon, global_step)
 
@@ -433,6 +467,7 @@ if __name__ == '__main__':
               min_memory_size=FLAGS.min_memory_size,
               max_memory_size=FLAGS.max_memory_size,
               ckpt_freq=FLAGS.ckpt_freq,
+              log_freq=FLAGS.log_freq,
               base_dir=FLAGS.base_dir,
               render=FLAGS.render)
     else:
