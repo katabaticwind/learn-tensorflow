@@ -22,7 +22,7 @@ tf.app.flags.DEFINE_float('learning_rate', 0.00025, """Initial learning rate."""
 tf.app.flags.DEFINE_integer('batch_size', 32, """Examples per training update.""")
 tf.app.flags.DEFINE_float('discount_factor', 0.99, """Discount factor in update.""")
 tf.app.flags.DEFINE_float('init_epsilon', 1.0, """Initial exploration rate.""")
-tf.app.flags.DEFINE_float('min_epsilon', 0.05, """Minimum exploration rate.""")
+tf.app.flags.DEFINE_float('min_epsilon', 0.02, """Minimum exploration rate.""")
 tf.app.flags.DEFINE_integer('anneal_steps', 1000000, """Steps to anneal exploration over.""")
 tf.app.flags.DEFINE_integer('episodes', 10000, """Episodes per train/test run.""")
 tf.app.flags.DEFINE_integer('update_freq', 4, """Number of actions between updates.""")
@@ -182,10 +182,12 @@ def train(env_name='CartPole-v0',
         targets = tf.reduce_sum(target_mask * target_values, axis=1)
 
         # define training operation
-        loss = tf.clip_by_value(tf.losses.mean_squared_error(values, targets_pl), -1, 1)  # error clipping
-        train_op = tf.train.RMSPropOptimizer(learning_rate=learning_rate,
-                                             momentum=0.95,
-                                             epsilon=0.01).minimize(loss)
+        # loss = tf.clip_by_value(tf.losses.mean_squared_error(targets_pl, values), -1, 1)  # error clipping
+        loss = tf.losses.mean_squared_error(targets_pl, values) # no error clipping
+        train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(loss)
+        # train_op = tf.train.RMSPropOptimizer(learning_rate=learning_rate,
+        #                                      momentum=0.95,
+        #                                      epsilon=0.01).minimize(loss)
 
         # define cloning operation
         source = tf.get_default_graph().get_collection('trainable_variables', scope='value')
@@ -258,8 +260,9 @@ def train(env_name='CartPole-v0',
         while True:
 
             # select an action
-            if np.random.rand() < global_epsilon:
-                action = np.random.randint(env.action_space.n)
+            if np.random.random() < global_epsilon:
+                # action = np.random.randint(env.action_space.n)
+                action = env.action_space.sample()
             else:
                 action = sess.run(greedy_action,
                     feed_dict={
