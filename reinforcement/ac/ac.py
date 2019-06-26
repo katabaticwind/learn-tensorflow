@@ -2,15 +2,19 @@ import tensorflow as tf
 import numpy as np
 import gym
 import time
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
 
 env_name = 'CartPole-v0'
 device = '/cpu:0'
-lr = 1e-3
-batch_size = 5000
+lr = 1e-2
+batch_size = 32
 gamma = 1.00
 state_dim = 4
 action_dim = 2
 sizes = [32]
+max_steps = 5000
 
 def mlp(x, sizes, activation, output_activation=None):
     for size in sizes[:-1]:
@@ -48,6 +52,7 @@ def train():
         next_states = []
         done_flags = []
         batch_returns = []
+        batch_episodes = 0
         while len(states) < batch_size:
             state = env.reset()
             episode_return = 0.0
@@ -55,28 +60,105 @@ def train():
             while True:
                 action = sess.run(action_sample, feed_dict={states_pl: state.reshape(1, -1)})[0]
                 next_state, reward, done, info = env.step(action)
-                states += [state.copy()]
+                states += [state]
                 actions += [action]
                 rewards += [reward]
-                next_states += [next_state.copy()]
+                next_states += [next_state]
                 done_flags += [done]
                 state = next_state  # update state!
                 episode_return += reward
                 if done:
                     batch_returns += [episode_return]
+                    batch_episodes += 1
                     break
-        print(f"batch_return={np.mean(batch_returns)}")
-        return np.array(states), np.array(actions), np.array(rewards), np.array(next_states), np.array(done_flags)
+        # print(f"batch_return={np.mean(batch_returns)}, batch_episodes={batch_episodes}, batch_steps={len(states)}")
+        return np.array(states), np.array(actions), np.array(rewards), np.array(next_states), np.array(done_flags), np.mean(batch_returns)
 
     with tf.Session() as sess:
         sess.run(init_op)
         env = gym.make(env_name)
-        while True:
-            states, actions, rewards, next_states, done_flags = collect_experience()
-            targets = sess.run(value_targets, feed_dict={states_pl: next_states, rewards_pl: rewards, flags_pl: ~done_flags})
-            sess.run(value_update, feed_dict={states_pl: states, targets_pl: targets})
-            targets = sess.run(policy_targets, feed_dict={states_pl: states, targets_pl: targets})
-            sess.run(policy_update, feed_dict={states_pl: states, actions_pl: actions, targets_pl: targets})
+        returns = []
+        ma_returns = []
+        steps = 0
+        xvals = []
+        for batch in range(max_steps):
+            states, actions, rewards, next_states, done_flags, mean_returns = collect_experience()
+            returns += [mean_returns]
+            ma_returns += [np.mean(np.array(returns)[-100:])]
+            steps += len(states)
+            xvals += [steps]
+
+            # calculate value targets
+            v_targets = sess.run(
+                value_targets,
+                feed_dict={
+                    states_pl: next_states,
+                    rewards_pl: rewards,
+                    flags_pl: ~done_flags
+                }
+            )
+
+            # update value function
+            sess.run(
+                value_update,
+                feed_dict={
+                    states_pl: states,
+                    targets_pl: v_targets
+                }
+            )
+
+            v_targets = sess.run(
+                value_targets,
+                feed_dict={
+                    states_pl: next_states,
+                    rewards_pl: rewards,
+                    flags_pl: ~done_flags
+                }
+            )
+            p_targets = sess.run(
+                policy_targets,
+                feed_dict={
+                    states_pl: states,
+                    targets_pl: v_targets
+                }
+            )
+
+            # calculate policy targets
+            # targets = sess.run(
+            #     value_targets,
+            #     feed_dict={
+            #         states_pl: next_states,
+            #         rewards_pl: rewards,
+            #         flags_pl: ~done_flags
+            #     }
+            # )
+            # targets = sess.run(
+            #     policy_targets,
+            #     feed_dict={
+            #         states_pl: states,
+            #         targets_pl: targets
+            #     }
+            # )
+
+            # upate policy function
+            sess.run(
+                policy_update,
+                feed_dict={
+                    states_pl: states,
+                    actions_pl: actions,
+                    targets_pl: p_targets
+                }
+            )
+
+            if batch % 25 == 0:
+                print(f"batch={batch}, steps={steps}, value_target={np.mean(v_targets):.2f}, policy_target={np.mean(p_targets):.2f}, avg_return={ma_returns[-1]:.2f}")
+                plt.plot(xvals, np.array(returns), color='C0')
+                plt.plot(xvals, np.array(ma_returns), color='C1')
+                # plt.xlim(0, max_steps)
+                plt.ylim(0, 250)
+                plt.pause(0.01)
+        plt.show()
+
 
 if __name__ == '__main__':
     train()

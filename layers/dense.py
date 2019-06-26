@@ -13,7 +13,7 @@ def dense(inputs, hidden_units, activation, dtype = tf.float32):
     """
     inputs_units = tf.shape(inputs)[1]
     weights = tf.Variable(name='weights', shape=(input_units, hidden_units), dtype = dtype)
-    bias = tf.Variables(name='bias', shape=(hidden_units, ), dtype=dtype)
+    bias = tf.Variable(name='bias', shape=(hidden_units, ), dtype=dtype)
     return activation(tf.add(bias, tf.matmul(inputs, weights)))
 
 def conv2d(inputs):

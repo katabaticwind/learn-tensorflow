@@ -17,8 +17,8 @@ tf.app.flags.DEFINE_string('device', '/cpu:0', """'/cpu:0' or '/device:GPU:0'.""
 tf.app.flags.DEFINE_string('env_name', 'CartPole-v0', """Gym environment.""")
 tf.app.flags.DEFINE_string('hidden_units', '32', """Size of hidden layers.""")
 tf.app.flags.DEFINE_float('learning_rate', '1e-2', """Initial learning rate.""")
-tf.app.flags.DEFINE_integer('batches', 100, """Batches per training update.""")
-tf.app.flags.DEFINE_integer('batch_size', 5000, """Batches per training update.""")
+tf.app.flags.DEFINE_integer('batches', 100, """Batches per training routine.""")
+tf.app.flags.DEFINE_integer('batch_size', 5000, """Example per training update batch.""")
 tf.app.flags.DEFINE_integer('episodes', 100, """Episodes per test.""")
 tf.app.flags.DEFINE_integer('ckpt_freq', 10, """Batches between checkpoints.""")
 tf.app.flags.DEFINE_string('base_dir', '.', """Base directory for checkpoints and logs.""")
@@ -93,7 +93,7 @@ def train(env_name='CartPole-v0',
         # define policy network training operation
         actions_mask = tf.one_hot(actions_pl, n_actions)
         log_probs = tf.reduce_sum(actions_mask * tf.nn.log_softmax(logits), axis=1)  # use tf.mask instead?
-        policy_loss = -tf.reduce_mean((weights_pl - values) * log_probs)
+        policy_loss = -tf.reduce_mean((weights_pl - values) * log_probs)  # TODO: tf.stop_gradient(values)?
         policy_train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(policy_loss)  # TODO: creates tf.math_ops warning (?)
 
         # define value network training operation
