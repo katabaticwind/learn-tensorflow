@@ -16,7 +16,7 @@ tf.logging.set_verbosity(tf.logging.ERROR)
 FLAGS = tf.app.flags.FLAGS
 
 tf.app.flags.DEFINE_string('mode', 'train', """'Train' or 'test'.""")
-tf.app.flags.DEFINE_string('env_name', 'Pong-v0', """Gym environment.""")
+tf.app.flags.DEFINE_string('env_name', 'PongDeterministic-v4', """Gym environment.""")
 tf.app.flags.DEFINE_string('device', '/cpu:0', """'/cpu:0' or '/gpu:0'.""")
 tf.app.flags.DEFINE_float('learning_rate', 0.00025, """Initial learning rate.""")
 tf.app.flags.DEFINE_integer('batch_size', 32, """Examples per training update.""")
@@ -34,6 +34,7 @@ tf.app.flags.DEFINE_integer('max_memory_size', 100000, """Maximum number of repl
 tf.app.flags.DEFINE_integer('ckpt_freq', 25, """Episodes per checkpoint.""")
 tf.app.flags.DEFINE_integer('log_freq', 25, """Steps per log.""")
 tf.app.flags.DEFINE_string('base_dir', '.', """Base directory for checkpoints and logs.""")
+tf.app.flags.DEFINE_float('pass_condition', 19.5, """Average score considered passing environment.""")
 tf.app.flags.DEFINE_boolean('render', False, """Render episodes (once per `ckpt_freq` in training mode).""")
 
 
@@ -120,6 +121,7 @@ def train(env_name='CartPole-v0',
           ckpt_freq=25,
           log_freq=25,
           base_dir=None,
+          pass_condition=19.5,
           render=True):
 
     # create log and checkpoint directories
@@ -254,6 +256,8 @@ def train(env_name='CartPole-v0',
         state = collect_frames(frame_queue, nframes=agent_history)
         episode_reward = 0
         episode_steps = 0
+        start_time = time.time()
+        start_step = global_step
         if render == True:
             env.render()
             time.sleep(delay)
@@ -338,7 +342,9 @@ def train(env_name='CartPole-v0',
                 print("episode reached max_steps")
                 break
 
-        return episode_reward, episode_steps, global_step, global_epsilon
+        fps = (global_step - start_step) / (time.time() - start_time)
+
+        return episode_reward, episode_steps, global_step, global_epsilon, fps
 
     with tf.Session() as sess:
         sess.run(tf.global_variables_initializer())
@@ -349,17 +355,18 @@ def train(env_name='CartPole-v0',
         global_epsilon = init_epsilon
         t0 = time.time()
         reward_history = []
+        fps = 0.0
         for episode in range(episodes):
 
             # run an episode
             if (episode + 1) % ckpt_freq == 0:
-                reward, steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=render)  # optionally render one episode per checkpoint
+                reward, steps, global_step, global_epsilon, fps = run_episode(env, sess, global_step, global_epsilon, render=render)  # optionally render one episode per checkpoint
             else:
-                reward, steps, global_step, global_epsilon = run_episode(env, sess, global_step, global_epsilon, render=False)
+                reward, steps, global_step, global_epsilon, fps = run_episode(env, sess, global_step, global_epsilon, render=False)
             reward_history += [reward]
             elapsed_time = time.time() - t0
             avg_reward = np.mean(reward_history[-100:])
-            print('episode: {:d},  reward: {:.2f},  avg. reward: {:.2f},  steps:  {:d},  epsilon: {:.2f}, lr: {:.2e},  elapsed: {:.2f}'.format(episode + 1, reward, avg_reward, global_step, global_epsilon, learning_rate, elapsed_time))
+            print('episode: {:d},  reward: {:.2f},  avg. reward: {:.2f},  steps:  {:d},  epsilon: {:.2f}, lr: {:.2e},  elapsed: {:.2f}, fps: {:.2f}'.format(episode + 1, reward, avg_reward, global_step, global_epsilon, learning_rate, elapsed_time, fps))
 
             # logging
             log_scalar(writer, 'reward', reward, global_step)
@@ -367,11 +374,17 @@ def train(env_name='CartPole-v0',
             log_scalar(writer, 'avg_reward', avg_reward, global_step)
             log_scalar(writer, 'learning_rate', learning_rate, global_step)
             log_scalar(writer, 'epsilon', global_epsilon, global_step)
+            log_scalar(writer, 'fps', fps, global_step)
 
             # checkpoint
             if (episode + 1) % ckpt_freq == 0:
                 if ckpt_dir is not None:
                     saver.save(sess, save_path=ckpt_dir + "/ckpt", global_step=global_step)
+
+            # passing check
+            if avg_reward >= pass_condition:
+                print('Pass condition reached!')
+                break
 
         # final checkpoint
         if ckpt_dir is not None:
@@ -472,6 +485,7 @@ if __name__ == '__main__':
               ckpt_freq=FLAGS.ckpt_freq,
               log_freq=FLAGS.log_freq,
               base_dir=FLAGS.base_dir,
+              pass_condition=FLAGS.pass_condition,
               render=FLAGS.render)
     else:
         test(env_name=FLAGS.env_name,
