@@ -3,6 +3,8 @@ import numpy as np
 
 # TODO: Add a layer on top of the RNN layer to convert output to proper logits. The current output is determined by the number of hidden units in the RNN cell, but it should be determined by the size of the desired output (e.g. the number of classes available).
 
+# TODO: one-hot encode inputs
+
 """Example of an RNN cell."""
 def rnn(inputs, state, hidden_units, activation):
     """Create a basic RNN unit.
@@ -128,7 +130,8 @@ def rnn_unrolled(inputs, state, hidden_units, activation, sequence_len):
         name='bias_output'
     )
 
-    logits = []
+    # training
+    logits_train = []
     for i in range(sequence_len):
         state = tf.nn.tanh(
             tf.add(
@@ -136,11 +139,29 @@ def rnn_unrolled(inputs, state, hidden_units, activation, sequence_len):
                 tf.add(tf.matmul(state, weights_state), bias_state)
             )
         )
-        logits += [
+        logits_train += [
             activation(tf.add(tf.matmul(state, weights_output), bias_output))
         ]
+    logits = tf.stack(logits_train, axis=1)
 
-    return state, tf.stack(logits, axis=1)
+    # testing
+    predictions = []
+    next_input = inputs[:, :, 1]
+    for i in range(sequence_len):
+        state = tf.nn.tanh(
+            tf.add(
+                tf.add(tf.matmul(next_input, weights_inputs), bias_inputs),
+                tf.add(tf.matmul(state, weights_state), bias_state)
+            )
+        )
+        logits_test = activation(
+            tf.add(tf.matmul(state, weights_output), bias_output)
+        )
+        predictions += [tf.cast(tf.multinomial(logits_test, 1), tf.float32)]
+        next_input = predictions[-1]
+    predictions = tf.stack(predictions, axis=1)
+
+    return state, logits, predictions
 
 def rnn_unrolled_example():
     sequence_len = 3
@@ -165,16 +186,19 @@ def rnn_unrolled_example():
 def rnn_unrolled_char_example():
     # set parameters
     lr = 1e-3
-    max_updates = 1000
+    max_epochs = 10
+    log_dir = './logs/'
+    log_freq = 50
     batch_size = 32
     sequence_len = 64
     inputs_dim = 1
     state_dim = 32
-    hidden_units = 65  # number of unique characters
+    hidden_units = 67  # number of unique characters
+    sample_size = 256
     # construct graph
     inputs_pl = tf.placeholder(shape=[None, inputs_dim, sequence_len], dtype=tf.float32)
     state_pl = tf.placeholder(shape=[None, state_dim], dtype=tf.float32)
-    state, logits = rnn_unrolled(
+    state, logits, predictions = rnn_unrolled(
         inputs_pl,
         state_pl,
         hidden_units=hidden_units,
@@ -192,14 +216,20 @@ def rnn_unrolled_char_example():
     opt = tf.train.AdamOptimizer(learning_rate=lr)
     train_op = opt.minimize(loss)
     init_op = tf.global_variables_initializer()
+    # add summaries
+    tf.summary.scalar('loss', loss)
+    summary_op = tf.summary.merge_all()
     # load data
     txt = open('./data/iliad.txt').read()
+    txt += open('./data/odyssey.txt').read()
     inputs, labels, idx_to_char, _ = preprocess_text(txt, batch_size, sequence_len)
     # train network
     with tf.Session() as sess:
         sess.run(init_op)
+        writer = tf.summary.FileWriter(log_dir, sess.graph)
+        global_step = 0
         for epoch in range(max_epochs):
-            for step in range(max_updates):
+            for step in range(len(inputs)):
                 if step == 0:
                     feed_dict = {
                         inputs_pl: inputs[0].astype(np.float32),
@@ -213,8 +243,27 @@ def rnn_unrolled_char_example():
                         labels_pl: np.squeeze(labels[step], axis=1)
                     }
                 # perform an update
-                state_np, cross_entropy_loss, _ = sess.run([state, loss, train_op], feed_dict=feed_dict)
-                print(f"epoch={epoch}, step={step}, loss={cross_entropy_loss}")
+                if step % log_freq == 0:
+                    state_np, cross_entropy_loss, _, summary = sess.run([state, loss, train_op, summary_op], feed_dict=feed_dict)
+                    writer.add_summary(summary, global_step)
+                    print(f"epoch={epoch}, step={step}, loss={cross_entropy_loss}")
+                else:
+                    state_np, cross_entropy_loss, _ = sess.run([state, loss, train_op], feed_dict=feed_dict)
+                global_step += 1
+    # test network
+    with tf.Session() as sess:
+        sess.run(init_op)
+        idx = []
+        while len(idx) < sample_size:
+            feed_dict = {
+                inputs_pl: inputs[0][0, :, :].reshape(1, inputs_dim, sequence_len),
+                state_pl: np.zeros([1, state_dim])
+            }
+            new_idx = np.squeeze(sess.run(predictions, feed_dict=feed_dict)).tolist()
+            idx += new_idx
+    txt = ''.join([idx_to_char[i] for i in idx])
+    print(txt)
+    return txt
 
 def rnn_unrolled_hmm_example():
     # set parameters
@@ -355,3 +404,5 @@ def preprocess_text(txt, batch_size, sequence_len, dtype='int'):
     inputs = np.split(inputs, sequences_per_segment, axis=1)
     labels = np.split(labels, sequences_per_segment, axis=1)
     return inputs, labels, idx_to_char, char_to_idx
+
+rnn_unrolled_char_example()
