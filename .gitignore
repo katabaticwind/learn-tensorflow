@@ -2,6 +2,7 @@ checkpoints/
 logs/
 meta/
 .DS_Store
+recurrent/tales/stories/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
