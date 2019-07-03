@@ -54,7 +54,14 @@ def import_data(dir, batch_size, sequence_len, dtype='int'):
     inputs = np.split(inputs, sequences_per_segment, axis=1)
     labels = np.split(labels, sequences_per_segment, axis=1)
     print('done.')
-    return inputs, labels, idx_to_char, char_to_idx, tokens
+
+    data = {'inputs': inputs, 'labels': labels}
+    mappings = {'idx_to_char': idx_to_char, 'char_to_idx': char_to_idx}
+
+    return data, mappings, tokens
+
+class SequenceData():
+    pass
 
 class RNN(object):
     """docstring for RNN."""
@@ -62,6 +69,10 @@ class RNN(object):
     def __init__(self, input_dim, state_dim, output_dim):
 
         super(RNN, self).__init__()
+
+        self.input_dim = input_dim
+        self.state_dim = state_dim
+        self.output_dim = output_dim
 
         self.Wx = tf.Variable(
             tf.truncated_normal([input_dim, state_dim], stddev=0.02),
@@ -89,20 +100,17 @@ class RNN(object):
         # )
 
         self.state_train = tf.Variable(
-            tf.zeros([None, state_dim],
-            dtype=tf.float32,
+            tf.zeros([batch_size, state_dim], dtype=tf.float32),
             name='state_train',
-            trainable=False)
+            trainable=False
         )
         self.state_valid = tf.Variable(
-            tf.zeros([None, state_dim],
-            dtype=tf.float32,
+            tf.zeros([batch_size, state_dim], dtype=tf.float32),
             name='state_valid',
-            trainable=False)
+            trainable=False
         )
 
-
-    def inference(self, inputs, state):
+    def inference(self, inputs):
         """Construct graph for training RNN.
 
             # Arguments
@@ -114,20 +122,19 @@ class RNN(object):
             - `state`: [None, state_dim] tensor representing final state
         """
         logits = []
+        state = self.state_train
+        inputs = self.one_hot_inputs(inputs)
         for input in inputs:
             state = tf.nn.tanh(
                 tf.add(
-                    tf.add(
-                        tf.matmul(input, self.Wx),
-                        tf.matmul(state, self.Ws)
-                    ),
-                    self.bs
+                    tf.matmul(input, self.Wx),
+                    tf.matmul(state, self.Ws)
                 )
             )
-            logits += [tf.add(tf.matmul(state, self.Wy), self.by)]
+            logits += [tf.matmul(state, self.Wy)]
         return logits, state
 
-    def predict(self, input, state, size=1, temperature=1.0):
+    def predict(self, input, size=1, temperature=1.0):
         """Construct graph for predicting from an input.
 
             # Arguments
@@ -139,67 +146,99 @@ class RNN(object):
             - `prediction`: [None, output_dim] tensor representing predicted output
             - `state`: [None, state_dim] tensor representing next state
         """
+        state = self.state_test
         state = tf.nn.tanh(
             tf.add(
-                tf.add(
-                    tf.matmul(input, self.Wx),
-                    tf.matmul(state, self.Ws)
-                ),
-                self.bs
+                tf.matmul(input, self.Wx),
+                tf.matmul(state, self.Ws)
             )
         )
-        logits = tf.add(tf.matmul(state / temperature, self.Wy), self.by)
+        logits = tf.matmul(state / temperature, self.Wy)
         prediction = tf.multinomial(logits, size)
-        return prediction, state
+        return prediction
 
-# def inference(rnn):
-#     scores = []
-#     predictions = []
-#     outputs = []  # ?
-#
-#     output = rnn.state_train
-#
-#     for batch in dataset:
-#         output = tf.nn.tanh(
-#             tf.matmul(
-#                 tf.concat([batch, output], 1),
-#                 tf.concat([rnn.Wx, rnn.Ws], 0)
-#             )
-#         )
-#         outputs += [output]
-#         logits = tf.matmul(output, rnn.Wy)
-#         scores += [logits]
-#         predictions += [tf.nn.softmax(logits)]
+    def train(self, logits, labels, init_state):
+        with tf.control_dependencies([tf.assign(self.state_train, init_state)]):
+            loss = tf.reduce_mean(
+                tf.nn.sparse_softmax_cross_entropy_with_logits(
+                    logits=logits,
+                    labels=labels
+                )
+            )
+        opt = tf.train.AdamOptimizer(learning_rate=lr)
+        train_op = opt.minimize(loss)
+        return loss, train_op
 
+    def one_hot_inputs(self, placeholders):
+        return [tf.squeeze(tf.one_hot(pl, self.input_dim), axis=1) for pl in placeholders]
 
+    def reset(self):
+        reset_train_op = tf.assign(
+            self.state_train,
+            tf.zeros([batch_size, self.state_dim], dtype=tf.float32)
+        )
+        reset_test_op = tf.assign(
+            self.state_valid,
+            tf.zeros([batch_size, self.state_dim], dtype=tf.float32)
+        )
+        return reset_train_op, reset_test_op
 
 
 input_dim = 67
-state_dim = 32
+state_dim = 64
 output_dim = 67
-seq_len = 8
-batch_size = 4
-inputs, labels, idx_to_char, char_to_idx, tokens = import_data('./data/', batch_size, seq_len)
+seq_len = 64
+batch_size = 64
+lr = 1e-3
+data, mappings, tokens = import_data('./data/', batch_size, seq_len)
 rnn = RNN(input_dim, state_dim, output_dim)
-inputs_train = [tf.placeholder(tf.int32, [None, 1]) for _ in range(seq_len)]
-inputs_train_onehot = [tf.squeeze(tf.one_hot(pl, input_dim), axis=1) for pl in inputs_train]
-init_state_train = tf.placeholder(tf.float32, [None, state_dim])
-logits, state_train = rnn.decode(inputs_train_onehot, init_state_train)
-inputs_test = tf.placeholder(tf.int32, [None, 1])
-inputs_test_onehot = tf.squeeze(tf.one_hot(inputs_test, input_dim), axis=1)
-init_state_test = tf.placeholder(tf.float32, [None, state_dim])
-prediction, state_test = rnn.predict(inputs_test_onehot, init_state_test)
-
+inputs_pl = [tf.placeholder(tf.int32, [None, 1]) for _ in range(seq_len)]
+labels_pl = tf.placeholder(tf.int32, [None, seq_len])
+logits, init_state = rnn.inference(inputs_pl)
+loss, train_op = rnn.train(logits, labels_pl, init_state)
+reset_op, _ = rnn.reset()
 with tf.Session() as sess:
     sess.run(tf.global_variables_initializer())
+    while True:
+        for batch in range(len(data['inputs'])):
+            if batch == 0:
+                sess.run(reset_op)
+            batch_inputs = np.split(np.squeeze(data['inputs'][batch], axis=1), seq_len, axis=1)
+            feed_dict = {i: d for i, d in zip(inputs_pl, batch_inputs)}
+            feed_dict[labels_pl] = np.squeeze(data['labels'][batch], axis=1)
+            xentropy, _ = sess.run([loss, train_op], feed_dict=feed_dict)
+            if batch % 100 == 0:
+                print(f"batch={batch}, loss={xentropy:.2f}, perplexity={np.exp(xentropy):.2f}")
 
-    # train
-    batch_inputs = np.split(np.squeeze(inputs[0], axis=1), seq_len, axis=1)
-    feed_dict = {i: d for i, d in zip(inputs_train, batch_inputs)}
-    feed_dict[init_state_train] = np.zeros([batch_size, state_dim])
-    logits_np, state_np = sess.run([logits, state_train], feed_dict=feed_dict)
 
-    # test
-    init_input = np.array([char_to_idx[np.random.choice(tokens)]]).reshape(1, -1)
-    feed_dict = {inputs_test: init_input, init_state_test: np.zeros([1, state_dim])}
-    prediction_np, state_np = sess.run([prediction, state_test], feed_dict=feed_dict)
+
+
+# input_dim = 67
+# state_dim = 32
+# output_dim = 67
+# seq_len = 8
+# batch_size = 4
+# inputs, labels, idx_to_char, char_to_idx, tokens = import_data('./data/', batch_size, seq_len)
+# rnn = RNN(input_dim, state_dim, output_dim)
+# inputs_train = [tf.placeholder(tf.int32, [None, 1]) for _ in range(seq_len)]
+# inputs_train_onehot = [tf.squeeze(tf.one_hot(pl, input_dim), axis=1) for pl in inputs_train]
+# init_state_train = tf.placeholder(tf.float32, [None, state_dim])
+# logits, state_train = rnn.decode(inputs_train_onehot, init_state_train)
+# inputs_test = tf.placeholder(tf.int32, [None, 1])
+# inputs_test_onehot = tf.squeeze(tf.one_hot(inputs_test, input_dim), axis=1)
+# init_state_test = tf.placeholder(tf.float32, [None, state_dim])
+# prediction, state_test = rnn.predict(inputs_test_onehot, init_state_test)
+#
+# with tf.Session() as sess:
+#     sess.run(tf.global_variables_initializer())
+#
+#     # train
+#     batch_inputs = np.split(np.squeeze(inputs[0], axis=1), seq_len, axis=1)
+#     feed_dict = {i: d for i, d in zip(inputs_train, batch_inputs)}
+#     feed_dict[init_state_train] = np.zeros([batch_size, state_dim])
+#     logits_np, state_np = sess.run([logits, state_train], feed_dict=feed_dict)
+#
+#     # test
+#     init_input = np.array([char_to_idx[np.random.choice(tokens)]]).reshape(1, -1)
+#     feed_dict = {inputs_test: init_input, init_state_test: np.zeros([1, state_dim])}
+#     prediction_np, state_np = sess.run([prediction, state_test], feed_dict=feed_dict)

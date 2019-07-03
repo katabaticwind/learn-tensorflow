@@ -1,117 +1,117 @@
 from __future__ import print_function, division
 import numpy as np
 import tensorflow as tf
-import matplotlib
-matplotlib.use('TkAgg')
-import matplotlib.pyplot as plt
 
+def create_batches(character_list, batch_size, backprop_length):
+    """
+        Create list of arrays with shape `[batch_size, backprop_length]`.
+
+        # Argument
+        -  `character_list`: [batch_size, ...] array
+    """
+    batch_size, total_length = character_list.shape
+    sections, remainder = divmod(total_length, backprop_length)
+    return np.split(character_list[:, :-remainder], sections, axis=-1)
+
+def split_data(inputs, dim):
+    """
+        Split a batch of inputs into a list for backpropogation over time.
+
+        # Arguments
+        - `inputs`: [batch_size, backprop_length] placeholder
+
+        # Returns
+        - `inputs_series`: list of `backprop_length` [batch_size, dim] tensors
+    """
+    inputs_one_hots = tf.one_hot(inputs, dim)
+    inputs_series = tf.split(inputs_one_hots, backprop_length, axis=1)
+    inputs_series = [tf.squeeze(ip, axis=1) for ip in inputs_series]
+    return inputs_series
+
+# Configuration
 num_epochs = 100
 total_series_length = 50000
-truncated_backprop_length = 15
+backprop_length = 15  # truncated backpropogation length (i.e. training sequence length)
 state_size = 4
 num_classes = 2
 echo_step = 3
 batch_size = 5
-num_batches = total_series_length//batch_size//truncated_backprop_length
+batches_per_epoch = total_series_length // batch_size // backprop_length
 
-def generateData():
+
+def generate_data():
     x = np.array(np.random.choice(2, total_series_length, p=[0.5, 0.5]))
     y = np.roll(x, echo_step)
     y[0:echo_step] = 0
-
     x = x.reshape((batch_size, -1))  # The first index changing slowest, subseries as rows
     y = y.reshape((batch_size, -1))
-
     return (x, y)
 
-batchX_placeholder = tf.placeholder(tf.float32, [batch_size, truncated_backprop_length])
-batchY_placeholder = tf.placeholder(tf.int32, [batch_size, truncated_backprop_length])
 
+# Placeholders
+inputs_placeholder = tf.placeholder(tf.float32, [batch_size, backprop_length])
+labels_placeholder = tf.placeholder(tf.int32, [batch_size, backprop_length])
 init_state = tf.placeholder(tf.float32, [batch_size, state_size])
+inputs_series = tf.unstack(inputs_placeholder, axis=1)
+labels_series = tf.unstack(labels_placeholder, axis=1)
 
-W = tf.Variable(np.random.rand(state_size+1, state_size), dtype=tf.float32)
-b = tf.Variable(np.zeros((1,state_size)), dtype=tf.float32)
+# Graph
+Wxs = tf.Variable(np.random.rand(1, state_size), dtype=tf.float32)
+Wss = tf.Variable(np.random.rand(state_size, state_size), dtype=tf.float32)
+bs = tf.Variable(np.zeros((1, state_size)), dtype=tf.float32)
+Wsy = tf.Variable(np.random.rand(state_size, num_classes),dtype=tf.float32)
+by = tf.Variable(np.zeros((1, num_classes)), dtype=tf.float32)
 
-W2 = tf.Variable(np.random.rand(state_size, num_classes),dtype=tf.float32)
-b2 = tf.Variable(np.zeros((1,num_classes)), dtype=tf.float32)
+# Inference
+state = init_state
+logits_series = []
+predictions_series = []
+for inputs in inputs_series:
+    inputs = tf.reshape(inputs, [batch_size, 1])
+    state = tf.tanh(tf.matmul(inputs, Wxs) + tf.matmul(state , Wss) + bs)
+    logits_series += [tf.matmul(state, Wsy) + by]
+    predictions_series += [tf.nn.softmax(tf.matmul(state, Wsy) + by)]
 
-# Unpack columns
-inputs_series = tf.unstack(batchX_placeholder, axis=1)
-labels_series = tf.unstack(batchY_placeholder, axis=1)
+# Backpropogation
+loss = tf.reduce_mean(
+    tf.nn.sparse_softmax_cross_entropy_with_logits(
+        logits=logits_series,
+        labels=labels_series
+    )  # mapped across series -> [backprop_length, batch_size] tensor
+)
+train_op = tf.train.AdagradOptimizer(0.3).minimize(loss)
 
-# Forward pass
-current_state = init_state
-states_series = []
-for current_input in inputs_series:
-    current_input = tf.reshape(current_input, [batch_size, 1])
-    input_and_state_concatenated = tf.concat([current_input, current_state], 1)  # Increasing number of columns
-
-    next_state = tf.tanh(tf.matmul(input_and_state_concatenated, W) + b)  # Broadcasted addition
-    states_series.append(next_state)
-    current_state = next_state
-
-logits_series = [tf.matmul(state, W2) + b2 for state in states_series] #Broadcasted addition
-predictions_series = [tf.nn.softmax(logits) for logits in logits_series]
-
-losses = [tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=labels) for logits, labels in zip(logits_series,labels_series)]
-total_loss = tf.reduce_mean(losses)
-
-train_step = tf.train.AdagradOptimizer(0.3).minimize(total_loss)
-
-def plot(loss_list, predictions_series, batchX, batchY):
-    plt.subplot(2, 3, 1)
-    plt.cla()
-    plt.plot(loss_list)
-
-    for batch_series_idx in range(5):
-        one_hot_output_series = np.array(predictions_series)[:, batch_series_idx, :]
-        single_output_series = np.array([(1 if out[0] < 0.5 else 0) for out in one_hot_output_series])
-
-        plt.subplot(2, 3, batch_series_idx + 2)
-        plt.cla()
-        plt.axis([0, truncated_backprop_length, 0, 2])
-        left_offset = range(truncated_backprop_length)
-        plt.bar(left_offset, batchX[batch_series_idx, :], width=1, color="blue")
-        plt.bar(left_offset, batchY[batch_series_idx, :] * 0.5, width=1, color="red")
-        plt.bar(left_offset, single_output_series * 0.3, width=1, color="green")
-
-    plt.draw()
-    plt.pause(0.0001)
-
-
+# Training
 with tf.Session() as sess:
-    sess.run(tf.initialize_all_variables())
-    plt.ion()
-    plt.figure()
-    plt.show()
-    loss_list = []
-
+    sess.run(tf.global_variables_initializer())
     for epoch_idx in range(num_epochs):
-        x,y = generateData()
-        _current_state = np.zeros((batch_size, state_size))
 
         print("New data, epoch", epoch_idx)
 
-        for batch_idx in range(num_batches):
-            start_idx = batch_idx * truncated_backprop_length
-            end_idx = start_idx + truncated_backprop_length
+        # Generate new data
+        x, y = generate_data()
 
-            batchX = x[:,start_idx:end_idx]
-            batchY = y[:,start_idx:end_idx]
+        # Reset initial state (optional)
+        _state = np.zeros((batch_size, state_size))
 
-            _total_loss, _train_step, _current_state, _predictions_series = sess.run(
-                [total_loss, train_step, current_state, predictions_series],
+        # Loop through batches
+        for batch_idx in range(batches_per_epoch):
+
+            # Find next batch
+            start_idx = batch_idx * backprop_length
+            end_idx = start_idx + backprop_length
+            batch_inputs = x[:, start_idx:end_idx]
+            batch_labels = y[:, start_idx:end_idx]
+
+            # Perform update
+            _loss, _, _state, _predictions_series = sess.run(
+                [loss, train_op, state, predictions_series],
                 feed_dict={
-                    batchX_placeholder:batchX,
-                    batchY_placeholder:batchY,
-                    init_state:_current_state
+                    inputs_placeholder: batch_inputs,
+                    labels_placeholder: batch_labels,
+                    init_state:_state
                 })
 
-            loss_list.append(_total_loss)
-
+            # Report status
             if batch_idx % 100 == 0:
-                print("Step",batch_idx, "Loss", _total_loss)
-                plot(loss_list, _predictions_series, batchX, batchY)
-
-plt.ioff()
-plt.show()
+                print("batch: ", batch_idx, "xentropy", _loss)
