@@ -167,5 +167,6 @@ def test():
                 if batch_idx % 100 == 0:
                     print("batch: ", batch_idx, "xentropy", _loss)
 
+
 if __name__ == "__main__":
     test()
