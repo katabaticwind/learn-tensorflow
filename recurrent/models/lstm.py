@@ -194,7 +194,7 @@ def test():
     labels_series = tf.unstack(labels_placeholder, axis=1)
 
     # Graph
-    lstm = LSTM(input_size, state_size, num_classes)
+    lstm = LSTM(input_size, state_size)
     outputs_series, hidden, memory = lstm.forward(inputs_series, init_hidden, init_memory)
     Why = tf.Variable(
         tf.truncated_normal([state_size, num_classes], stddev=0.02),
