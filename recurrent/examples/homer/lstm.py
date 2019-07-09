@@ -5,9 +5,8 @@ import time
 import os
 from datetime import datetime
 
+
 FLAGS = tf.app.flags.FLAGS
-
-
 tf.app.flags.DEFINE_string('mode', 'train', """'train' or 'test'.""")
 tf.app.flags.DEFINE_string('data_dir', '../../data/', """Directory where data is stored.""")
 tf.app.flags.DEFINE_string('base_dir', '.', """Base directory for checkpoints and summaries.""")
@@ -135,7 +134,6 @@ class LSTM(object):
             - `memory`: [None, hidden_dim] placeholder representing memory state
 
             # Returns
-            - `prediction`: [None, output_dim] tensor representing predicted output
             - `next_hidden`: [None, hidden_dim] tensor representing next hidden state
             - `next_memory`: [None, hidden_dim] tensor representing next memory state
         """
