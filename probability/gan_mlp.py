@@ -36,7 +36,7 @@ def mlp(inputs, sizes, activation=tf.nn.relu, scope='', reuse=None):
 # I. Import MNIST data
 images = load_data()
 sample_size = 64
-noise_size = 8
+noise_size = 16
 image_size = 28 * 28
 
 # II. Setup the graph
@@ -46,7 +46,7 @@ images_pl = tf.placeholder(tf.float32, [None, image_size])
 noise_pl = tf.placeholder(tf.float32, [None, noise_size])
 
 # 2. Create networks
-images_fake = mlp(noise_pl, [64, 32, image_size], scope='generator')
+images_fake = mlp(noise_pl, [32, 64, image_size], scope='generator')
 logits_real = mlp(images_pl, [64, 32, 1], scope='discriminator')
 logits_fake = mlp(images_fake, [64, 32, 1], scope='discriminator', reuse=True)
 
