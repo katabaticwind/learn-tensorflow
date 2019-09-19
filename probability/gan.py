@@ -1,10 +1,16 @@
 import tensorflow as tf
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # suppress all messages
+tf.logging.set_verbosity(tf.logging.ERROR)
 import numpy as np
 import matplotlib.pyplot as plt
+from time import time
 
-max_steps = 20000
+
+max_steps = 10000
 log_steps = 100
-learning_rate = 1e-5
+learning_rate = 1e-4
+log_dir = './logs/run_{:.2f}'.format(time())
 
 
 def load_data():
@@ -29,7 +35,7 @@ def mlp(inputs, sizes, activation=tf.nn.relu, scope='', reuse=None):
 
 # I. Import MNIST data
 images = load_data()
-sample_size = 32
+sample_size = 64
 noise_size = 8
 image_size = 28 * 28
 
@@ -58,12 +64,31 @@ optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
 train_op_d = optimizer.minimize(loss_d, var_list=variables_d)
 train_op_g = optimizer.minimize(loss_g, var_list=variables_g)
 
+# 5. Create summary op
+sample_images = tf.reshape(images_fake[:16, :], [-1, 28, 28, 1])
+summary_op_d = tf.summary.merge(
+    [
+        tf.summary.scalar('loss_d', loss_d),
+        tf.summary.histogram('prob_real', probs_real_real),
+        tf.summary.histogram('prob_fake', probs_real_fake),
+        tf.summary.histogram('logits_real', logits_real),
+        tf.summary.histogram('logits_fake', logits_fake)
+    ]
+)
+summary_op_g = tf.summary.merge(
+    [
+        tf.summary.scalar('loss_g', loss_g),
+        tf.summary.image('images_fake', sample_images, max_outputs=16)
+    ]
+)
 
 # III. Train the networks
 with tf.Session() as sess:
     sess.run(tf.global_variables_initializer())
+    writer = tf.summary.FileWriter(log_dir, sess.graph)
     loss = {'D': None, 'G': None}
-    for iter in range(max_steps):
+    start = time()
+    for step in range(max_steps):
         # 1. Sample z ~ N(0, 1)
         z = np.random.randn(sample_size, noise_size)
 
@@ -72,29 +97,23 @@ with tf.Session() as sess:
         x = images[idx, :]
 
         # 3. Update discriminator
-        feed_dict = {images_pl: x, noise_pl: z}
-        loss['D'], _ = sess.run([loss_d, train_op_d], feed_dict=feed_dict)
+        loss['D'], _, summary_d = sess.run(
+            [loss_d, train_op_d, summary_op_d],
+            feed_dict={images_pl: x, noise_pl: z}
+        )
 
         # 4. Update generator
-        feed_dict = {noise_pl: z}
-        loss['G'], _ = sess.run([loss_g, train_op_g], feed_dict=feed_dict)
+        loss['G'], _, summary_g = sess.run(
+            [loss_g, train_op_g, summary_op_g],
+            feed_dict={noise_pl: z}
+        )
 
         # 5. Logging
-        if iter % log_steps == 0 and iter > 0:
-            print("iter={}, loss_d={}, loss_g={}".format(
-                iter,
+        if step % log_steps == 0 and step > 0:
+            writer.add_summary(summary_d, step)
+            writer.add_summary(summary_g, step)
+            print("step={:d}, loss_d={:.2f}, loss_g={:.2f}, elapsed={:.2f}".format(
+                step,
                 loss['D'],
-                loss['G']))
-
-    # IV. Generate samples
-
-    # 1. Sample z ~ N(0, 1)
-    z = np.random.randn(16, noise_size)
-
-    # 2. Perform forward pass
-    img = sess.run(images_fake, feed_dict={noise_pl: z})
-
-    # 3. Display the result
-    for i in range(16):
-        plt.subplot(4, 4, i + 1)
-        plt.imshow(img[i, :].reshape(28, 28))
+                loss['G'],
+                time() - start))
